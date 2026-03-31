@@ -1,0 +1,23 @@
+[project]
+name = "spread-scanner"
+version = "0.1.0"
+description = "Real-time crypto futures spread scanner across Binance, Hyperliquid, and Gate"
+requires-python = ">=3.12"
+dependencies = [
+    "websockets>=12.0",
+    "aiohttp>=3.9",
+    "pydantic>=2.5",
+    "python-dotenv>=1.0",
+    "structlog>=24.1",
+    "httpx>=0.27",
+    "pydantic-settings>=2.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+
+[project.scripts]
+spread-scanner = "main:main"

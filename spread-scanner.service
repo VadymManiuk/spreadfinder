@@ -1,0 +1,18 @@
+[Unit]
+Description=Spread Scanner Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=scanner
+WorkingDirectory=/opt/spread-scanner
+EnvironmentFile=/opt/spread-scanner/.env
+ExecStart=/usr/bin/python3 -m main
+Restart=always
+RestartSec=5
+KillSignal=SIGTERM
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
