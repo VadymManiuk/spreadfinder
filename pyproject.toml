@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "spread-scanner"
 version = "0.1.0"
@@ -21,3 +25,19 @@ dev = [
 
 [project.scripts]
 spread-scanner = "main:main"
+
+[tool.setuptools]
+py-modules = ["main"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = [
+    "alerting*",
+    "config*",
+    "exchange_adapters*",
+    "filters*",
+    "models*",
+    "spread_engine*",
+    "symbol_mapper*",
+    "utils*",
+]
