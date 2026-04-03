@@ -15,6 +15,7 @@ import pytest
 from models.snapshot import SpreadOpportunity
 from filters.opportunity_filters import (
     check_min_gross_spread,
+    check_max_gross_spread,
     check_min_net_spread,
     check_min_bid_size,
     check_min_ask_size,
@@ -82,6 +83,19 @@ class TestMinNetSpread:
 
     def test_negative_net(self):
         assert not check_min_net_spread(make_opp(net_spread_bps=Decimal("-2")), Decimal("0"))
+
+
+class TestMaxGrossSpread:
+    def test_pass(self):
+        assert check_max_gross_spread(make_opp(gross_spread_bps=Decimal("499.9")), Decimal("500"))
+
+    def test_exact_boundary(self):
+        assert check_max_gross_spread(make_opp(gross_spread_bps=Decimal("500")), Decimal("500"))
+
+    def test_reject(self):
+        result = check_max_gross_spread(make_opp(gross_spread_bps=Decimal("500.1")), Decimal("500"))
+        assert not result
+        assert "gross_spread_bps" in result.reason
 
 
 class TestMinBidSize:
@@ -273,6 +287,28 @@ class TestFilterChain:
         # Should have stopped at first filter
         assert len(results) == 1
         assert results[0].filter_name == "min_gross_spread"
+
+    def test_configurable_max_gross_spread_can_allow_large_moves(self):
+        chain = FilterChain(
+            min_gross_spread_bps=Decimal("1"),
+            max_gross_spread_bps=Decimal("2500"),
+            min_net_spread_bps=Decimal("1"),
+            min_bid_size=Decimal("1"),
+            min_ask_size=Decimal("1"),
+            max_data_age_ms=5000,
+            min_confidence=Decimal("0.0"),
+            cooldown_seconds=0,
+            persistence_ms=0,
+        )
+        opp = make_opp(
+            gross_spread_bps=Decimal("1967.92"),
+            net_spread_bps=Decimal("1951.44"),
+        )
+
+        passed, results = chain.evaluate(opp)
+
+        assert passed
+        assert all(r.passed for r in results)
 
     def test_cooldown_blocks_second_alert(self):
         chain = FilterChain(

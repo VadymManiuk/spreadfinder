@@ -80,6 +80,7 @@ All settings are in `.env`. See `.env.example` for the full list with defaults.
 | Setting | Default | Description |
 |---------|---------|-------------|
 | `MIN_GROSS_SPREAD_BPS` | 10.0 | Minimum gross spread in basis points |
+| `MAX_GROSS_SPREAD_BPS` | 500.0 | Maximum gross spread allowed before treating it as bad/stale data |
 | `MIN_NET_SPREAD_BPS` | 5.0 | Minimum net spread after costs |
 | `COOLDOWN_SECONDS` | 300 | Alert cooldown per symbol+direction |
 | `PERSISTENCE_MS` | 1000 | Spread must persist this long before alert |

@@ -121,6 +121,7 @@ class SpreadScanner:
         self._mapper = SymbolMapper(exchanges=settings.enabled_exchanges)
         self._filter_chain = FilterChain(
             min_gross_spread_bps=settings.filters.min_gross_spread_bps,
+            max_gross_spread_bps=settings.filters.max_gross_spread_bps,
             min_net_spread_bps=settings.filters.min_net_spread_bps,
             min_bid_size=settings.filters.min_bid_size,
             min_ask_size=settings.filters.min_ask_size,
@@ -133,6 +134,7 @@ class SpreadScanner:
         logger.info(
             "filter_chain_config",
             min_gross_spread_bps=float(settings.filters.min_gross_spread_bps),
+            max_gross_spread_bps=float(settings.filters.max_gross_spread_bps),
             min_net_spread_bps=float(settings.filters.min_net_spread_bps),
         )
         self._telegram = TelegramSender(
