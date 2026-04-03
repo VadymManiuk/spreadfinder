@@ -36,6 +36,8 @@ DEFAULT_FEES: dict[str, tuple[Decimal, Decimal]] = {
     "bybit":       (Decimal("0.0002"), Decimal("0.00055")),  # 0.02% maker, 0.055% taker  # ESTIMATE
     "okx":         (Decimal("0.0002"), Decimal("0.0005")),   # 0.02% maker, 0.05% taker   # ESTIMATE
     "bitget":      (Decimal("0.0002"), Decimal("0.0006")),   # 0.02% maker, 0.06% taker   # ESTIMATE
+    "aster":       (Decimal("0.0002"), Decimal("0.0005")),   # 0.02% maker, 0.05% taker   # ESTIMATE
+    "lighter":     (Decimal("0.0002"), Decimal("0.0005")),   # 0.02% maker, 0.05% taker   # ESTIMATE
 }
 
 # Slippage factor as fraction of mid price

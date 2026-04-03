@@ -247,6 +247,113 @@ def _parse_bitget_symbols(data: dict) -> list[str]:
     return symbols
 
 
+# Aster: Binance API clone — same format ("BTCUSDT")
+ASTER_QUOTE_ASSETS = ("USDT",)
+
+
+def aster_native_to_canonical(native: str) -> str | None:
+    """Convert Aster "BTCUSDT" to "BTC-USDT-PERP"."""
+    for quote in ASTER_QUOTE_ASSETS:
+        if native.endswith(quote):
+            base = native[: -len(quote)]
+            if base:
+                return f"{base}-{quote}-PERP"
+    return None
+
+
+def aster_canonical_to_native(canonical: str) -> str | None:
+    """Convert "BTC-USDT-PERP" to Aster "BTCUSDT"."""
+    parts = canonical.split("-")
+    if len(parts) != 3 or parts[2] != "PERP":
+        return None
+    return f"{parts[0]}{parts[1]}"
+
+
+def _parse_aster_symbols(data: dict) -> list[str]:
+    """Extract perpetual symbols from Aster exchangeInfo (Binance clone)."""
+    symbols = []
+    for s in data.get("symbols", []):
+        if s.get("contractType") == "PERPETUAL" and s.get("status") == "TRADING":
+            symbols.append(s["symbol"])
+    return symbols
+
+
+# Lighter: symbols are base asset only ("ETH", "BTC"), quoted in USDC.
+# Markets identified by index. Non-crypto perps (stocks, forex, commodities) are excluded.
+LIGHTER_QUOTE = "USDC"
+
+# Symbols that are NOT crypto and should be excluded from matching
+LIGHTER_NON_CRYPTO = {
+    "SPX", "SPY", "QQQ", "IWM", "DIA", "BOTZ", "MAGS", "URA", "ROBO",  # ETFs/indices
+    "HOOD", "COIN", "NVDA", "PLTR", "TSLA", "AAPL", "AMZN", "MSFT",     # stocks
+    "GOOGL", "META", "INTC", "AMD", "SNDK", "SAMSUNG", "HYUNDAI",        # stocks
+    "KRCOMP", "SKHYNIX", "ASML", "MSTR", "HANMI",                        # stocks
+    "XAU", "XAG", "XCU", "XPD", "XPT",                                   # metals
+    "WTI", "BRENTOIL", "NATGAS",                                          # commodities
+    "EURUSD", "GBPUSD", "USDJPY", "USDCHF", "USDCAD",                   # forex
+    "AUDUSD", "NZDUSD", "USDKRW",                                        # forex
+}
+
+
+def lighter_native_to_canonical(native: str) -> str | None:
+    """Convert Lighter "ETH" to "ETH-USDC-PERP"."""
+    if not native or "-" in native or "/" in native:
+        return None
+    if native in LIGHTER_NON_CRYPTO:
+        return None
+    return f"{native}-{LIGHTER_QUOTE}-PERP"
+
+
+def lighter_canonical_to_native(canonical: str) -> str | None:
+    """Convert "ETH-USDC-PERP" to Lighter "ETH"."""
+    parts = canonical.split("-")
+    if len(parts) != 3 or parts[2] != "PERP":
+        return None
+    if parts[1] != LIGHTER_QUOTE:
+        return None
+    return parts[0]
+
+
+def _parse_lighter_symbols(data: list) -> list[str]:
+    """
+    Extract perp symbols from Lighter markets response.
+
+    Response format: [{"symbol": "ETH", "market_index": 0}, ...]
+    Only include perp markets (index < 2048, spot >= 2048).
+    Excludes non-crypto symbols (stocks, forex, commodities).
+    """
+    symbols = []
+    for item in data:
+        if isinstance(item, dict):
+            idx = item.get("market_index", 9999)
+            sym = item.get("symbol", "")
+            # Perps have index < 2048, spots >= 2048
+            if idx < 2048 and sym and sym not in LIGHTER_NON_CRYPTO:
+                # Skip symbols with "/" (spot pairs like "ETH/USDC")
+                if "/" not in sym:
+                    symbols.append(sym)
+    return symbols
+
+
+# Lighter also needs market_index for WS subscriptions.
+# This is stored separately and fetched during bootstrap.
+LIGHTER_MARKET_INDEX_MAP: dict[str, int] = {}
+
+
+def lighter_parse_and_store_indices(data: list) -> list[str]:
+    """Parse symbols AND store market indices for WS subscription."""
+    LIGHTER_MARKET_INDEX_MAP.clear()
+    symbols = []
+    for item in data:
+        if isinstance(item, dict):
+            idx = item.get("market_index", 9999)
+            sym = item.get("symbol", "")
+            if idx < 2048 and sym and sym not in LIGHTER_NON_CRYPTO and "/" not in sym:
+                symbols.append(sym)
+                LIGHTER_MARKET_INDEX_MAP[sym] = idx
+    return symbols
+
+
 # Registry of supported exchanges
 EXCHANGE_CONFIGS: dict[str, ExchangeConfig] = {
     "binance": ExchangeConfig(
@@ -290,5 +397,19 @@ EXCHANGE_CONFIGS: dict[str, ExchangeConfig] = {
         to_canonical=bitget_native_to_canonical,
         to_native=bitget_canonical_to_native,
         parse_symbols=_parse_bitget_symbols,
+    ),
+    "aster": ExchangeConfig(
+        name="aster",
+        rest_url="https://fapi.asterdex.com/fapi/v3/exchangeInfo",
+        to_canonical=aster_native_to_canonical,
+        to_native=aster_canonical_to_native,
+        parse_symbols=_parse_aster_symbols,
+    ),
+    "lighter": ExchangeConfig(
+        name="lighter",
+        rest_url="https://explorer.elliot.ai/api/markets",
+        to_canonical=lighter_native_to_canonical,
+        to_native=lighter_canonical_to_native,
+        parse_symbols=lighter_parse_and_store_indices,
     ),
 }

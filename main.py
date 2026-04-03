@@ -63,6 +63,7 @@ _kill_old_instances()
 import asyncio
 import signal
 import sys
+import time as _time
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -77,6 +78,9 @@ from exchange_adapters.gate import GateAdapter
 from exchange_adapters.bybit import BybitAdapter
 from exchange_adapters.okx import OkxAdapter
 from exchange_adapters.bitget import BitgetAdapter
+from exchange_adapters.aster import AsterAdapter
+from exchange_adapters.lighter import LighterAdapter
+from symbol_mapper.exchange_symbols import LIGHTER_MARKET_INDEX_MAP
 from spread_engine.calculator import calculate_spread
 from filters.filter_chain import FilterChain
 from alerting.telegram import TelegramSender
@@ -102,6 +106,11 @@ class SpreadScanner:
 
         # Latest snapshot per (exchange, canonical_symbol)
         self._snapshots: dict[tuple[str, str], MarketSnapshot] = {}
+
+        # Snapshot throttle: don't recalculate spreads for the same key
+        # more than once per second. Reduces CPU on high-frequency feeds.
+        self._last_calc_time: dict[tuple[str, str], float] = {}
+        self._min_calc_interval: float = 1.0  # seconds
 
         # Cross-quote matchable pairs built after bootstrap.
         # Maps (exchange, canonical) -> list of (other_exchange, other_canonical)
@@ -141,6 +150,13 @@ class SpreadScanner:
         """
         key = (snapshot.exchange, snapshot.canonical_symbol)
         self._snapshots[key] = snapshot
+
+        # Throttle: skip spread calculation if we just did it for this key
+        now = _time.monotonic()
+        last = self._last_calc_time.get(key, 0)
+        if now - last < self._min_calc_interval:
+            return
+        self._last_calc_time[key] = now
 
         # Look up which (exchange, canonical) pairs we should compare against
         counterparts = self._match_lookup.get(key, [])
@@ -242,6 +258,21 @@ class SpreadScanner:
                     symbols=native_symbols,
                     on_snapshot=self._on_snapshot,
                     canonical_map=canonical_map,
+                    stale_threshold_seconds=stale_threshold,
+                )
+            elif exchange == "aster":
+                adapter = AsterAdapter(
+                    symbols=native_symbols,
+                    on_snapshot=self._on_snapshot,
+                    canonical_map=canonical_map,
+                    stale_threshold_seconds=stale_threshold,
+                )
+            elif exchange == "lighter":
+                adapter = LighterAdapter(
+                    symbols=native_symbols,
+                    on_snapshot=self._on_snapshot,
+                    canonical_map=canonical_map,
+                    market_index_map=LIGHTER_MARKET_INDEX_MAP,
                     stale_threshold_seconds=stale_threshold,
                 )
             else:

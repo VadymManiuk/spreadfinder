@@ -91,6 +91,14 @@ class ExchangeFees(BaseSettings):
     bitget_maker: Decimal = Decimal("0.0002")
     bitget_taker: Decimal = Decimal("0.0006")
 
+    # Aster: 0.02% maker, 0.05% taker  # ESTIMATE
+    aster_maker: Decimal = Decimal("0.0002")
+    aster_taker: Decimal = Decimal("0.0005")
+
+    # Lighter: 0.02% maker, 0.05% taker  # ESTIMATE
+    lighter_maker: Decimal = Decimal("0.0002")
+    lighter_taker: Decimal = Decimal("0.0005")
+
     # Slippage factor (fraction of mid price)
     # ESTIMATE — small caps will have higher slippage
     slippage_factor: Decimal = Decimal("0.0001")
