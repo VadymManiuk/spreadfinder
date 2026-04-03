@@ -7,7 +7,7 @@ Assumptions:
   - Aster API is a Binance Futures API clone — identical WS/REST format.
   - Uses combined stream URL: wss://fstream.asterdex.com/stream?streams=...
   - Subscribes to @bookTicker (best bid/ask) and @markPrice (mark, index, funding).
-  - Same 300 stream limit as Binance per connection.
+  - Uses the same 200-stream cap per connection as Binance Futures.
 """
 
 import asyncio
@@ -24,8 +24,9 @@ from models.snapshot import MarketSnapshot
 logger = structlog.get_logger(__name__)
 
 WS_BASE = "wss://fstream.asterdex.com"
-MAX_STREAMS_PER_CONN = 300
+MAX_STREAMS_PER_CONN = 200
 PING_INTERVAL_SECONDS = 15 * 60
+OPEN_TIMEOUT_SECONDS = 20
 
 
 class AsterAdapter(BaseExchangeAdapter):
@@ -66,6 +67,7 @@ class AsterAdapter(BaseExchangeAdapter):
             "aster_adapter_init",
             total_symbols=len(symbols),
             connections_needed=len(self._symbol_chunks),
+            symbols_per_conn=[len(c) for c in self._symbol_chunks],
         )
 
     @staticmethod
@@ -80,16 +82,26 @@ class AsterAdapter(BaseExchangeAdapter):
     async def _connect(self) -> None:
         for i, chunk in enumerate(self._symbol_chunks):
             url = self._build_ws_url_for_symbols(chunk)
-            self._log.info("connecting", connection=f"{i+1}/{len(self._symbol_chunks)}", symbol_count=len(chunk))
-            ws = await websockets.connect(url, ping_interval=None, ping_timeout=None, close_timeout=5)
+            self._log.info(
+                "connecting",
+                connection=f"{i+1}/{len(self._symbol_chunks)}",
+                symbol_count=len(chunk),
+                stream_count=len(chunk) * 2,
+            )
+            ws = await websockets.connect(
+                url,
+                ping_interval=None,
+                ping_timeout=None,
+                close_timeout=5,
+                open_timeout=OPEN_TIMEOUT_SECONDS,
+            )
             self._ws_connections[i] = ws
             self._log.info("connected", connection=f"{i+1}/{len(self._symbol_chunks)}")
 
     async def _disconnect(self) -> None:
-        for i, task in enumerate(self._ping_tasks):
-            if task:
-                task.cancel()
-                self._ping_tasks[i] = None
+        ping_tasks = [task for task in self._ping_tasks if task is not None]
+        await self._cancel_tasks(ping_tasks)
+        self._ping_tasks = [None for _ in self._ping_tasks]
         for i, ws in enumerate(self._ws_connections):
             if ws:
                 await ws.close()
@@ -112,16 +124,9 @@ class AsterAdapter(BaseExchangeAdapter):
 
     async def _listen(self) -> None:
         tasks = [asyncio.create_task(self._listen_one(i)) for i in range(len(self._ws_connections))]
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in pending:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        for task in done:
-            if task.exception():
-                raise task.exception()
+        error = await self._wait_until_first_task_finishes(tasks)
+        if error:
+            raise error
 
     async def _listen_one(self, conn_index: int) -> None:
         ws = self._ws_connections[conn_index]

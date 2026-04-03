@@ -219,6 +219,21 @@ class TestWSUrl:
         # Streams separated by /
         assert "/" in url.split("streams=")[1]
 
+    def test_large_symbol_list_is_split_by_stream_limit(self):
+        max_symbols_per_conn = MAX_STREAMS_PER_CONN // 2
+        symbols = [f"SYM{i}USDT" for i in range(max_symbols_per_conn * 2 + 5)]
+
+        adapter = BinanceAdapter(
+            symbols=symbols,
+            on_snapshot=lambda s: None,
+        )
+
+        assert [len(chunk) for chunk in adapter._symbol_chunks] == [
+            max_symbols_per_conn,
+            max_symbols_per_conn,
+            5,
+        ]
+
 
 # ---------------------------------------------------------------------------
 # Stale detection and backoff

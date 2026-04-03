@@ -6,11 +6,11 @@ Outputs: Normalized MarketSnapshot objects via callback.
 Assumptions:
   - Uses USDT-margined perpetual futures (fapi).
   - Subscribes to @bookTicker (best bid/ask) and @markPrice (mark, index, funding).
-  - Respects rate limits: max 300 streams per connection, ping every 20 min.
+  - Respects rate limits: max 200 streams per connection, ping every 20 min.
   - REST bootstrap for exchange info is handled by SymbolMapper, not here.
 
 Rate limits (Binance WebSocket):
-  - Max 300 streams per single connection
+  - Max 200 streams per single connection
   - Server sends ping every 3 min; client must respond with pong
   - Client should send ping if no data for 20 min (keep-alive)
   - Max 5 messages/sec sent by client
@@ -33,11 +33,14 @@ logger = structlog.get_logger(__name__)
 # Binance WS base URL for futures
 WS_BASE = "wss://fstream.binance.com"
 
-# Max streams per connection (Binance limit: 300)
-MAX_STREAMS_PER_CONN = 300
+# Max streams per connection (Binance futures limit: 200)
+MAX_STREAMS_PER_CONN = 200
 
 # Ping interval to keep connection alive (Binance recommends within 20 min)
 PING_INTERVAL_SECONDS = 15 * 60  # 15 min, well under the 20 min limit
+
+# Allow a bit more time for large combined-stream handshakes.
+OPEN_TIMEOUT_SECONDS = 20
 
 
 class BinanceAdapter(BaseExchangeAdapter):
@@ -48,7 +51,7 @@ class BinanceAdapter(BaseExchangeAdapter):
     Merges data into MarketSnapshot objects.
 
     Two streams per symbol means N symbols = 2N streams.
-    With 300 stream limit, max ~150 symbols per connection.
+    With 200 stream limit, max 100 symbols per connection.
     Automatically splits into multiple connections when needed.
     """
 
@@ -76,8 +79,8 @@ class BinanceAdapter(BaseExchangeAdapter):
         self._canonical_map = canonical_map or {}
 
         # Split symbols into chunks that fit within the stream limit
-        # 2 streams per symbol (bookTicker + markPrice), max 300 streams per conn
-        max_symbols_per_conn = MAX_STREAMS_PER_CONN // 2  # 150
+        # 2 streams per symbol (bookTicker + markPrice), max 200 streams per conn
+        max_symbols_per_conn = MAX_STREAMS_PER_CONN // 2  # 100
         self._symbol_chunks: list[list[str]] = [
             symbols[i:i + max_symbols_per_conn]
             for i in range(0, len(symbols), max_symbols_per_conn)
@@ -135,16 +138,16 @@ class BinanceAdapter(BaseExchangeAdapter):
                 ping_interval=None,  # we handle pings ourselves
                 ping_timeout=None,
                 close_timeout=5,
+                open_timeout=OPEN_TIMEOUT_SECONDS,
             )
             self._ws_connections[i] = ws
             self._log.info("connected", connection=f"{i + 1}/{len(self._symbol_chunks)}")
 
     async def _disconnect(self) -> None:
         """Close all WebSocket connections."""
-        for i, task in enumerate(self._ping_tasks):
-            if task:
-                task.cancel()
-                self._ping_tasks[i] = None
+        ping_tasks = [task for task in self._ping_tasks if task is not None]
+        await self._cancel_tasks(ping_tasks)
+        self._ping_tasks = [None for _ in self._ping_tasks]
         for i, ws in enumerate(self._ws_connections):
             if ws:
                 await ws.close()
@@ -177,19 +180,9 @@ class BinanceAdapter(BaseExchangeAdapter):
             asyncio.create_task(self._listen_one(i))
             for i in range(len(self._ws_connections))
         ]
-        # If any connection dies, we exit to trigger reconnect
-        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in pending:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-        # Re-raise any exception from the completed task
-        for task in done:
-            exc = task.exception()
-            if exc:
-                raise exc
+        error = await self._wait_until_first_task_finishes(tasks)
+        if error:
+            raise error
 
     async def _listen_one(self, conn_index: int) -> None:
         """Receive and process messages from a single connection."""
