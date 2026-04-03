@@ -7,6 +7,7 @@ Assumptions:
   - All thresholds, fees, timeouts, and secrets are configured here.
   - Defaults are tuned for small-cap tokens (<$200M market cap).
   - pydantic-settings loads from .env automatically.
+  - ALL sub-settings classes must include env_file=".env" to read from .env.
 """
 
 from decimal import Decimal
@@ -14,11 +15,18 @@ from decimal import Decimal
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Shared env file config — every sub-settings class needs this
+_ENV_FILE_CONFIG = {
+    "env_file": ".env",
+    "env_file_encoding": "utf-8",
+    "extra": "ignore",
+}
+
 
 class TelegramSettings(BaseSettings):
     """Telegram bot configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="TELEGRAM_")
+    model_config = SettingsConfigDict(env_prefix="TELEGRAM_", **_ENV_FILE_CONFIG)
 
     bot_token: str = ""
     chat_id: str = ""
@@ -27,9 +35,11 @@ class TelegramSettings(BaseSettings):
 class FilterSettings(BaseSettings):
     """Spread opportunity filter thresholds."""
 
-    # Spread thresholds
-    min_gross_spread_bps: Decimal = Decimal("10.0")
-    min_net_spread_bps: Decimal = Decimal("5.0")
+    model_config = SettingsConfigDict(**_ENV_FILE_CONFIG)
+
+    # Spread thresholds — default 1% net minimum (100 bps)
+    min_gross_spread_bps: Decimal = Decimal("50.0")
+    min_net_spread_bps: Decimal = Decimal("100.0")
 
     # Liquidity minimums
     min_bid_size: Decimal = Decimal("100.0")
@@ -42,7 +52,7 @@ class FilterSettings(BaseSettings):
     max_data_age_ms: int = 2000
 
     # Alert spam prevention
-    cooldown_seconds: int = 300
+    cooldown_seconds: int = 1800
     persistence_ms: int = 1000
 
     # Confidence threshold
@@ -54,6 +64,8 @@ class ExchangeFees(BaseSettings):
     Fee rates per exchange as decimal fractions.
     ESTIMATE — actual rates depend on VIP tier.
     """
+
+    model_config = SettingsConfigDict(**_ENV_FILE_CONFIG)
 
     # Binance: 0.02% maker, 0.04% taker
     binance_maker: Decimal = Decimal("0.0002")
@@ -67,6 +79,18 @@ class ExchangeFees(BaseSettings):
     gate_maker: Decimal = Decimal("0.00015")
     gate_taker: Decimal = Decimal("0.0005")
 
+    # Bybit: 0.02% maker, 0.055% taker  # ESTIMATE
+    bybit_maker: Decimal = Decimal("0.0002")
+    bybit_taker: Decimal = Decimal("0.00055")
+
+    # OKX: 0.02% maker, 0.05% taker  # ESTIMATE
+    okx_maker: Decimal = Decimal("0.0002")
+    okx_taker: Decimal = Decimal("0.0005")
+
+    # Bitget: 0.02% maker, 0.06% taker  # ESTIMATE
+    bitget_maker: Decimal = Decimal("0.0002")
+    bitget_taker: Decimal = Decimal("0.0006")
+
     # Slippage factor (fraction of mid price)
     # ESTIMATE — small caps will have higher slippage
     slippage_factor: Decimal = Decimal("0.0001")
@@ -74,6 +98,8 @@ class ExchangeFees(BaseSettings):
 
 class AdapterSettings(BaseSettings):
     """Exchange adapter connection settings."""
+
+    model_config = SettingsConfigDict(**_ENV_FILE_CONFIG)
 
     # Stale feed detection threshold (seconds)
     stale_threshold_seconds: float = 10.0
@@ -95,11 +121,7 @@ class Settings(BaseSettings):
         print(settings.filters.min_gross_spread_bps)
     """
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
+    model_config = SettingsConfigDict(**_ENV_FILE_CONFIG)
 
     # Sub-settings
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
@@ -114,3 +136,7 @@ class Settings(BaseSettings):
     enabled_exchanges: list[str] = Field(
         default_factory=lambda: ["binance", "hyperliquid", "gate"]
     )
+
+    # Market cap filter — targets small-cap tokens
+    max_market_cap: int = 200_000_000  # $200M — above this, skip token
+    mcap_refresh_interval: int = 1800  # 30 minutes

@@ -12,6 +12,54 @@ Assumptions:
   - Targets small-cap tokens (<$200M market cap).
 """
 
+# Clear bytecode cache on startup to ensure fresh code always runs.
+# This prevents stale .pyc files from overriding source changes.
+import importlib
+import os
+import pathlib
+import shutil
+
+_project_root = pathlib.Path(__file__).parent
+for _cache_dir in _project_root.rglob("__pycache__"):
+    shutil.rmtree(_cache_dir, ignore_errors=True)
+
+# ---- Single-instance lock ----
+# Kill any other running instances of this bot before starting.
+# This prevents duplicate alerts from multiple processes.
+_pidfile = _project_root / ".bot.pid"
+_my_pid = os.getpid()
+
+def _kill_old_instances() -> None:
+    """Kill any previously running bot instances using the PID file."""
+    if _pidfile.exists():
+        try:
+            old_pid = int(_pidfile.read_text().strip())
+            if old_pid != _my_pid:
+                os.kill(old_pid, 9)
+        except (ValueError, ProcessLookupError, PermissionError):
+            pass
+    # Also kill any other python -m main processes (belt + suspenders)
+    import subprocess
+    try:
+        result = subprocess.run(
+            ["pgrep", "-f", "python.*-m main"],
+            capture_output=True, text=True
+        )
+        for line in result.stdout.strip().split("\n"):
+            if line.strip():
+                pid = int(line.strip())
+                if pid != _my_pid:
+                    try:
+                        os.kill(pid, 9)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+    except Exception:
+        pass
+    _pidfile.write_text(str(_my_pid))
+
+_kill_old_instances()
+# ---- End single-instance lock ----
+
 import asyncio
 import signal
 import sys
@@ -26,6 +74,9 @@ from symbol_mapper.mapper import SymbolMapper
 from exchange_adapters.binance import BinanceAdapter
 from exchange_adapters.hyperliquid import HyperliquidAdapter
 from exchange_adapters.gate import GateAdapter
+from exchange_adapters.bybit import BybitAdapter
+from exchange_adapters.okx import OkxAdapter
+from exchange_adapters.bitget import BitgetAdapter
 from spread_engine.calculator import calculate_spread
 from filters.filter_chain import FilterChain
 from alerting.telegram import TelegramSender
@@ -52,6 +103,11 @@ class SpreadScanner:
         # Latest snapshot per (exchange, canonical_symbol)
         self._snapshots: dict[tuple[str, str], MarketSnapshot] = {}
 
+        # Cross-quote matchable pairs built after bootstrap.
+        # Maps (exchange, canonical) -> list of (other_exchange, other_canonical)
+        # to know which snapshots to compare for spreads.
+        self._match_lookup: dict[tuple[str, str], list[tuple[str, str]]] = {}
+
         # Components
         self._mapper = SymbolMapper(exchanges=settings.enabled_exchanges)
         self._filter_chain = FilterChain(
@@ -65,6 +121,11 @@ class SpreadScanner:
             cooldown_seconds=settings.filters.cooldown_seconds,
             persistence_ms=settings.filters.persistence_ms,
         )
+        logger.info(
+            "filter_chain_config",
+            min_gross_spread_bps=float(settings.filters.min_gross_spread_bps),
+            min_net_spread_bps=float(settings.filters.min_net_spread_bps),
+        )
         self._telegram = TelegramSender(
             bot_token=settings.telegram.bot_token,
             chat_id=settings.telegram.chat_id,
@@ -76,35 +137,48 @@ class SpreadScanner:
         Callback invoked by exchange adapters on each new market snapshot.
 
         Stores the snapshot and checks for spread opportunities against
-        all other exchanges that have data for the same symbol.
+        all matchable counterparts (including cross-quote like USDT↔USDC).
         """
         key = (snapshot.exchange, snapshot.canonical_symbol)
         self._snapshots[key] = snapshot
 
-        # Find snapshots from other exchanges for the same symbol
-        for (other_exchange, other_symbol), other_snap in self._snapshots.items():
-            if other_symbol != snapshot.canonical_symbol:
-                continue
-            if other_exchange == snapshot.exchange:
+        # Look up which (exchange, canonical) pairs we should compare against
+        counterparts = self._match_lookup.get(key, [])
+
+        for other_key in counterparts:
+            other_snap = self._snapshots.get(other_key)
+            if other_snap is None:
                 continue
 
             # Calculate spreads in both directions
+            # Note: snapshots may have different canonical_symbols (USDT vs USDC)
+            # so we use a cross-quote aware calculation
             opportunities = calculate_spread(snapshot, other_snap)
 
             for opp in opportunities:
+                # HARD SAFETY CHECK — never send alerts below 1% net spread
+                # regardless of any other filter settings
+                net_pct = float(opp.net_spread_bps) / 100.0
+                if net_pct < 1.0:
+                    continue
+
                 passed, results = self._filter_chain.evaluate(opp)
-                if passed:
-                    self._filter_chain.record_alert(opp)
-                    logger.info(
-                        "spread_alert",
-                        symbol=opp.canonical_symbol,
-                        buy=opp.buy_exchange,
-                        sell=opp.sell_exchange,
-                        gross_bps=float(opp.gross_spread_bps),
-                        net_bps=float(opp.net_spread_bps),
-                        confidence=float(opp.confidence),
-                    )
-                    await self._telegram.send_alert(opp)
+                if not passed:
+                    continue
+
+                self._filter_chain.record_alert(opp)
+                logger.info(
+                    "spread_alert",
+                    symbol=opp.canonical_symbol,
+                    buy=opp.buy_exchange,
+                    sell=opp.sell_exchange,
+                    buy_ask=str(opp.buy_ask),
+                    sell_bid=str(opp.sell_bid),
+                    gross_pct=round(float(opp.gross_spread_bps) / 100, 2),
+                    net_pct=round(net_pct, 2),
+                    confidence=float(opp.confidence),
+                )
+                await self._telegram.send_alert(opp)
 
     def _build_adapters(self) -> None:
         """Create exchange adapters based on symbol mapper results."""
@@ -149,6 +223,27 @@ class SpreadScanner:
                     canonical_map=canonical_map,
                     stale_threshold_seconds=stale_threshold,
                 )
+            elif exchange == "bybit":
+                adapter = BybitAdapter(
+                    symbols=native_symbols,
+                    on_snapshot=self._on_snapshot,
+                    canonical_map=canonical_map,
+                    stale_threshold_seconds=stale_threshold,
+                )
+            elif exchange == "okx":
+                adapter = OkxAdapter(
+                    symbols=native_symbols,
+                    on_snapshot=self._on_snapshot,
+                    canonical_map=canonical_map,
+                    stale_threshold_seconds=stale_threshold,
+                )
+            elif exchange == "bitget":
+                adapter = BitgetAdapter(
+                    symbols=native_symbols,
+                    on_snapshot=self._on_snapshot,
+                    canonical_map=canonical_map,
+                    stale_threshold_seconds=stale_threshold,
+                )
             else:
                 logger.warning("unknown_exchange_adapter", exchange=exchange)
                 continue
@@ -169,25 +264,32 @@ class SpreadScanner:
         logger.info("bootstrapping_symbol_mapper")
         await self._mapper.bootstrap()
 
-        # Log pairwise common symbols
-        pairwise = self._mapper.get_pairwise_common()
-        for (ex_a, ex_b), symbols in pairwise.items():
-            logger.info(
-                "common_symbols",
-                exchange_a=ex_a,
-                exchange_b=ex_b,
-                count=len(symbols),
-                sample=sorted(symbols)[:5],
-            )
+        # Step 1b: Build cross-quote matchable pairs (all tokens, no market cap filter)
+        matchable = self._mapper.get_matchable_pairs()
 
-        # Step 2: Build adapters
+        for pair in matchable:
+            key_a = (pair["exchange_a"], pair["canonical_a"])
+            key_b = (pair["exchange_b"], pair["canonical_b"])
+            self._match_lookup.setdefault(key_a, []).append(key_b)
+            self._match_lookup.setdefault(key_b, []).append(key_a)
+
+        logger.info(
+            "matchable_symbols",
+            total=len(matchable),
+            sample=[f"{p['base']} ({p['exchange_a']}↔{p['exchange_b']})" for p in matchable[:5]],
+        )
+
+        # Step 2: Build adapters (only subscribe to symbols in matchable pairs)
         self._build_adapters()
 
         if not self._adapters:
             logger.error("no_adapters_created", hint="Check exchange configs and symbol availability")
             return
 
-        # Step 3: Run all adapters concurrently
+        # Step 3: Start Telegram polling (for inline button callbacks)
+        await self._telegram.start_polling()
+
+        # Step 4: Run all adapters concurrently
         logger.info("starting_adapters", count=len(self._adapters))
         tasks = [asyncio.create_task(adapter.start()) for adapter in self._adapters]
 

@@ -16,16 +16,26 @@ import structlog
 
 from models.snapshot import MarketSnapshot, SpreadOpportunity
 from spread_engine.confidence import calculate_confidence
+from symbol_mapper.ticker_aliases import normalize_base
 
 logger = structlog.get_logger(__name__)
+
+# Tokens with 1000x multiplier on some exchanges.
+# If one exchange lists "1000PEPE" and another lists "PEPE",
+# the 1000x exchange price is 1000 * the raw token price.
+# We must divide the 1000x price by 1000 before comparing.
+_1000X_PREFIX = "1000"
 
 # Default fee rates per exchange (maker + taker for a round trip)
 # ESTIMATE — these are standard tiers, actual rates depend on VIP level
 DEFAULT_FEES: dict[str, tuple[Decimal, Decimal]] = {
     # (maker_rate, taker_rate)
-    "binance":     (Decimal("0.0002"), Decimal("0.0004")),  # 0.02% maker, 0.04% taker
-    "hyperliquid": (Decimal("0.0002"), Decimal("0.0005")),  # 0.02% maker, 0.05% taker
-    "gate":        (Decimal("0.00015"), Decimal("0.0005")), # 0.015% maker, 0.05% taker
+    "binance":     (Decimal("0.0002"), Decimal("0.0004")),   # 0.02% maker, 0.04% taker
+    "hyperliquid": (Decimal("0.0002"), Decimal("0.0005")),   # 0.02% maker, 0.05% taker
+    "gate":        (Decimal("0.00015"), Decimal("0.0005")),  # 0.015% maker, 0.05% taker
+    "bybit":       (Decimal("0.0002"), Decimal("0.00055")),  # 0.02% maker, 0.055% taker  # ESTIMATE
+    "okx":         (Decimal("0.0002"), Decimal("0.0005")),   # 0.02% maker, 0.05% taker   # ESTIMATE
+    "bitget":      (Decimal("0.0002"), Decimal("0.0006")),   # 0.02% maker, 0.06% taker   # ESTIMATE
 }
 
 # Slippage factor as fraction of mid price
@@ -75,40 +85,115 @@ def _estimate_slippage(mid_price: Decimal) -> Decimal:
     return SLIPPAGE_FACTOR * mid_price
 
 
+def _extract_base(canonical: str) -> str | None:
+    """Extract base asset from canonical symbol. 'APE-USDT-PERP' → 'APE'."""
+    parts = canonical.split("-")
+    return parts[0] if len(parts) == 3 else None
+
+
+def _get_price_multiplier(base: str) -> Decimal:
+    """
+    Get the price multiplier for a base asset.
+
+    Tokens listed as "1000PEPE" have prices that are 1000x the raw token price.
+    When comparing with an exchange that lists plain "PEPE", we need to
+    divide the 1000x price by 1000.
+
+    Returns 1000 if the base has a 1000x prefix, 1 otherwise.
+    """
+    if base.startswith(_1000X_PREFIX):
+        return Decimal("1000")
+    if base.startswith("k"):
+        # Hyperliquid uses "k" prefix for 1000x tokens (e.g., kPEPE)
+        return Decimal("1000")
+    return Decimal("1")
+
+
+def _normalize_snapshot_prices(
+    snap: MarketSnapshot, multiplier: Decimal
+) -> MarketSnapshot:
+    """
+    Return a price-adjusted copy of the snapshot if the token has a multiplier.
+
+    For 1000x tokens: divide prices by 1000, multiply sizes by 1000
+    (since 1 unit of 1000PEPE = 1000 units of PEPE).
+    """
+    if multiplier == 1:
+        return snap
+
+    return MarketSnapshot(
+        canonical_symbol=snap.canonical_symbol,
+        exchange=snap.exchange,
+        bid=snap.bid / multiplier,
+        ask=snap.ask / multiplier,
+        bid_size=snap.bid_size * multiplier,
+        ask_size=snap.ask_size * multiplier,
+        exchange_ts=snap.exchange_ts,
+        local_ts=snap.local_ts,
+        mark_price=snap.mark_price / multiplier if snap.mark_price else None,
+        index_price=snap.index_price / multiplier if snap.index_price else None,
+        funding_rate=snap.funding_rate,
+        volume_24h=snap.volume_24h,
+        is_stale=snap.is_stale,
+    )
+
+
 def calculate_spread(
     snap_a: MarketSnapshot,
     snap_b: MarketSnapshot,
     now: datetime | None = None,
 ) -> list[SpreadOpportunity]:
     """
-    Calculate spread opportunities between two snapshots of the same symbol.
+    Calculate spread opportunities between two snapshots.
+
+    Supports:
+      - Same-symbol comparisons (APE-USDT-PERP vs APE-USDT-PERP)
+      - Cross-quote comparisons (APE-USDT-PERP vs APE-USDC-PERP)
+      - Cross-ticker comparisons (1000PEPE-USDT-PERP vs PEPE-USDC-PERP)
+        with automatic 1000x price normalization
 
     Checks both directions:
       Direction 1: Buy on A (at A.ask), sell on B (at B.bid)
-        gross_spread = B.bid - A.ask
       Direction 2: Buy on B (at B.ask), sell on A (at A.bid)
-        gross_spread = A.bid - B.ask
 
     Returns a list of 0–2 SpreadOpportunity objects (only positive gross spreads).
     """
-    if snap_a.canonical_symbol != snap_b.canonical_symbol:
+    base_a = _extract_base(snap_a.canonical_symbol)
+    base_b = _extract_base(snap_b.canonical_symbol)
+
+    if base_a is None or base_b is None:
+        return []
+
+    # Normalize base names using alias map
+    norm_a = normalize_base(base_a)
+    norm_b = normalize_base(base_b)
+
+    if norm_a != norm_b:
         logger.warning(
             "symbol_mismatch",
             symbol_a=snap_a.canonical_symbol,
             symbol_b=snap_b.canonical_symbol,
+            normalized_a=norm_a,
+            normalized_b=norm_b,
         )
         return []
+
+    # Handle 1000x price normalization
+    mult_a = _get_price_multiplier(base_a)
+    mult_b = _get_price_multiplier(base_b)
+    adj_a = _normalize_snapshot_prices(snap_a, mult_a)
+    adj_b = _normalize_snapshot_prices(snap_b, mult_b)
 
     ref = now or datetime.now(timezone.utc)
     opportunities: list[SpreadOpportunity] = []
 
     # Direction 1: buy on A, sell on B
-    opp = _calc_one_direction(snap_a, snap_b, ref)
+    opp = _calc_one_direction(adj_a, adj_b, ref)
     if opp:
         opportunities.append(opp)
 
     # Direction 2: buy on B, sell on A
-    opp = _calc_one_direction(snap_b, snap_a, ref)
+    opp = _calc_one_direction(adj_b, adj_a, ref)
     if opp:
         opportunities.append(opp)
 

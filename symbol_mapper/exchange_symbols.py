@@ -149,6 +149,104 @@ def _parse_gate_symbols(data: list) -> list[str]:
     return symbols
 
 
+# Bybit linear perps: same format as Binance ("BTCUSDT")
+BYBIT_QUOTE_ASSETS = ("USDT", "USDC")
+
+# OKX perp swaps: "BTC-USDT-SWAP"
+OKX_QUOTE = "USDT"
+
+# Bitget USDT-futures: same format as Binance ("BTCUSDT")
+BITGET_QUOTE_ASSETS = ("USDT",)
+
+
+def bybit_native_to_canonical(native: str) -> str | None:
+    """Convert Bybit "BTCUSDT" to "BTC-USDT-PERP"."""
+    for quote in BYBIT_QUOTE_ASSETS:
+        if native.endswith(quote):
+            base = native[: -len(quote)]
+            if base:
+                return f"{base}-{quote}-PERP"
+    return None
+
+
+def bybit_canonical_to_native(canonical: str) -> str | None:
+    """Convert "BTC-USDT-PERP" to Bybit "BTCUSDT"."""
+    parts = canonical.split("-")
+    if len(parts) != 3 or parts[2] != "PERP":
+        return None
+    return f"{parts[0]}{parts[1]}"
+
+
+def okx_native_to_canonical(native: str) -> str | None:
+    """Convert OKX "BTC-USDT-SWAP" to "BTC-USDT-PERP"."""
+    parts = native.split("-")
+    if len(parts) != 3 or parts[2] != "SWAP":
+        return None
+    return f"{parts[0]}-{parts[1]}-PERP"
+
+
+def okx_canonical_to_native(canonical: str) -> str | None:
+    """Convert "BTC-USDT-PERP" to OKX "BTC-USDT-SWAP"."""
+    parts = canonical.split("-")
+    if len(parts) != 3 or parts[2] != "PERP":
+        return None
+    return f"{parts[0]}-{parts[1]}-SWAP"
+
+
+def bitget_native_to_canonical(native: str) -> str | None:
+    """Convert Bitget "BTCUSDT" to "BTC-USDT-PERP"."""
+    for quote in BITGET_QUOTE_ASSETS:
+        if native.endswith(quote):
+            base = native[: -len(quote)]
+            if base:
+                return f"{base}-{quote}-PERP"
+    return None
+
+
+def bitget_canonical_to_native(canonical: str) -> str | None:
+    """Convert "BTC-USDT-PERP" to Bitget "BTCUSDT"."""
+    parts = canonical.split("-")
+    if len(parts) != 3 or parts[2] != "PERP":
+        return None
+    return f"{parts[0]}{parts[1]}"
+
+
+def _parse_bybit_symbols(data: dict) -> list[str]:
+    """Extract linear perpetual symbols from Bybit instruments-info response."""
+    symbols = []
+    result = data.get("result", {})
+    for item in result.get("list", []):
+        if (
+            item.get("contractType") == "LinearPerpetual"
+            and item.get("status") == "Trading"
+        ):
+            symbols.append(item["symbol"])
+    return symbols
+
+
+def _parse_okx_symbols(data: dict) -> list[str]:
+    """Extract USDT-margined perpetual swap instruments from OKX response."""
+    symbols = []
+    for item in data.get("data", []):
+        if (
+            item.get("instType") == "SWAP"
+            and item.get("ctType") == "linear"
+            and item.get("state") == "live"
+            and item.get("settleCcy") == "USDT"
+        ):
+            symbols.append(item["instId"])
+    return symbols
+
+
+def _parse_bitget_symbols(data: dict) -> list[str]:
+    """Extract USDT-futures symbols from Bitget contracts response."""
+    symbols = []
+    for item in data.get("data", []):
+        if item.get("symbolStatus") == "normal":
+            symbols.append(item["symbol"])
+    return symbols
+
+
 # Registry of supported exchanges
 EXCHANGE_CONFIGS: dict[str, ExchangeConfig] = {
     "binance": ExchangeConfig(
@@ -171,5 +269,26 @@ EXCHANGE_CONFIGS: dict[str, ExchangeConfig] = {
         to_canonical=gate_native_to_canonical,
         to_native=gate_canonical_to_native,
         parse_symbols=_parse_gate_symbols,
+    ),
+    "bybit": ExchangeConfig(
+        name="bybit",
+        rest_url="https://api.bybit.com/v5/market/instruments-info?category=linear",
+        to_canonical=bybit_native_to_canonical,
+        to_native=bybit_canonical_to_native,
+        parse_symbols=_parse_bybit_symbols,
+    ),
+    "okx": ExchangeConfig(
+        name="okx",
+        rest_url="https://www.okx.com/api/v5/public/instruments?instType=SWAP",
+        to_canonical=okx_native_to_canonical,
+        to_native=okx_canonical_to_native,
+        parse_symbols=_parse_okx_symbols,
+    ),
+    "bitget": ExchangeConfig(
+        name="bitget",
+        rest_url="https://api.bitget.com/api/v2/mix/market/contracts?productType=USDT-FUTURES",
+        to_canonical=bitget_native_to_canonical,
+        to_native=bitget_canonical_to_native,
+        parse_symbols=_parse_bitget_symbols,
     ),
 }

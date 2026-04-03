@@ -203,3 +203,90 @@ class TestSymbolMapper:
         # BTC-USDT-PERP (binance) != BTC-USDC-PERP (hyperliquid)
         assert self.mapper.to_canonical("binance", "BTCUSDT") != \
                self.mapper.to_canonical("hyperliquid", "BTC")
+
+
+# ---------------------------------------------------------------------------
+# Quote-equivalence and matchable pairs
+# ---------------------------------------------------------------------------
+
+class TestQuoteEquivalence:
+
+    def test_extract_base(self):
+        assert SymbolMapper.extract_base("APE-USDT-PERP") == "APE"
+        assert SymbolMapper.extract_base("BTC-USDC-PERP") == "BTC"
+
+    def test_extract_base_invalid(self):
+        assert SymbolMapper.extract_base("BTCUSDT") is None
+        assert SymbolMapper.extract_base("APE-USDT") is None
+
+    def test_extract_quote(self):
+        assert SymbolMapper.extract_quote("APE-USDT-PERP") == "USDT"
+        assert SymbolMapper.extract_quote("BTC-USDC-PERP") == "USDC"
+
+    def test_quotes_equivalent_same(self):
+        assert SymbolMapper.are_quotes_equivalent("USDT", "USDT") is True
+
+    def test_quotes_equivalent_cross(self):
+        assert SymbolMapper.are_quotes_equivalent("USDT", "USDC") is True
+        assert SymbolMapper.are_quotes_equivalent("USDC", "USDT") is True
+
+    def test_quotes_not_equivalent(self):
+        assert SymbolMapper.are_quotes_equivalent("USDT", "EUR") is False
+
+
+class TestMatchablePairs:
+
+    def setup_method(self):
+        self.mapper = SymbolMapper(exchanges=["binance", "hyperliquid", "gate"])
+        self.mapper.load_static("binance", {
+            "BTCUSDT": "BTC-USDT-PERP",
+            "ETHUSDT": "ETH-USDT-PERP",
+            "APEUSDT": "APE-USDT-PERP",
+        })
+        self.mapper.load_static("hyperliquid", {
+            "BTC": "BTC-USDC-PERP",
+            "ETH": "ETH-USDC-PERP",
+            "APE": "APE-USDC-PERP",
+        })
+        self.mapper.load_static("gate", {
+            "BTC_USDT": "BTC-USDT-PERP",
+            "ETH_USDT": "ETH-USDT-PERP",
+        })
+
+    def test_finds_cross_quote_pairs(self):
+        """Binance USDT vs Hyperliquid USDC should match on same base."""
+        pairs = self.mapper.get_matchable_pairs()
+        bases = {p["base"] for p in pairs}
+        assert "BTC" in bases
+        assert "ETH" in bases
+        assert "APE" in bases
+
+    def test_binance_hyperliquid_matched(self):
+        pairs = self.mapper.get_matchable_pairs()
+        bh_pairs = [p for p in pairs
+                     if {p["exchange_a"], p["exchange_b"]} == {"binance", "hyperliquid"}]
+        assert len(bh_pairs) == 3  # BTC, ETH, APE
+
+    def test_same_quote_also_matched(self):
+        """Binance USDT vs Gate USDT (same quote) should also be matched."""
+        pairs = self.mapper.get_matchable_pairs()
+        bg_pairs = [p for p in pairs
+                     if {p["exchange_a"], p["exchange_b"]} == {"binance", "gate"}]
+        assert len(bg_pairs) == 2  # BTC, ETH
+
+    def test_pair_structure(self):
+        pairs = self.mapper.get_matchable_pairs()
+        for p in pairs:
+            assert "base" in p
+            assert "exchange_a" in p
+            assert "canonical_a" in p
+            assert "exchange_b" in p
+            assert "canonical_b" in p
+
+    def test_no_false_base_matches(self):
+        """Different base assets should never be matched."""
+        pairs = self.mapper.get_matchable_pairs()
+        for p in pairs:
+            base_a = SymbolMapper.extract_base(p["canonical_a"])
+            base_b = SymbolMapper.extract_base(p["canonical_b"])
+            assert base_a == base_b

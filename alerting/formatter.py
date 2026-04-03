@@ -37,6 +37,12 @@ def _fmt_bps(value: Decimal) -> str:
     return f"{value:.1f}"
 
 
+def _fmt_pct(bps: Decimal) -> str:
+    """Format basis points as percentage (100 bps = 1.00%)."""
+    pct = bps / 100
+    return f"{pct:.2f}%"
+
+
 def _fmt_funding(rate: Decimal | None) -> str:
     """Format funding rate as percentage, or '—' if unknown."""
     if rate is None:
@@ -79,8 +85,8 @@ def format_alert(opp: SpreadOpportunity) -> str:
     buy_ask = escape_md2(_fmt_decimal(opp.buy_ask))
     sell_bid = escape_md2(_fmt_decimal(opp.sell_bid))
 
-    gross_bps = escape_md2(_fmt_bps(opp.gross_spread_bps))
-    net_bps = escape_md2(_fmt_bps(opp.net_spread_bps))
+    gross_pct = escape_md2(_fmt_pct(opp.gross_spread_bps))
+    net_pct = escape_md2(_fmt_pct(opp.net_spread_bps))
 
     fees = escape_md2(_fmt_decimal(opp.estimated_fees))
     slippage = escape_md2(_fmt_decimal(opp.estimated_slippage))
@@ -105,7 +111,7 @@ def format_alert(opp: SpreadOpportunity) -> str:
         f"*Buy* {buy_ex} @ `{buy_ask}`",
         f"*Sell* {sell_ex} @ `{sell_bid}`",
         "",
-        f"*Gross:* {gross_bps} bps \\| *Net:* {net_bps} bps",
+        f"*Gross:* {gross_pct} \\| *Net:* {net_pct}",
         f"*Fees:* {fees} \\| *Slip:* {slippage}",
         "",
         f"*Funding:* {buy_funding} / {sell_funding}",

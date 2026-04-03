@@ -7,12 +7,15 @@ Assumptions:
   - Only perpetual futures are mapped. Dated futures and spot are excluded.
   - Ambiguous or unrecognized symbols are skipped with a warning log.
   - Symbol lists are bootstrapped from exchange REST APIs on startup.
+  - Quote-equivalent stablecoins (USDT ↔ USDC) are treated as matchable
+    for spread detection, since they trade near $1 parity.
 """
 
 import structlog
 import aiohttp
 
 from symbol_mapper.exchange_symbols import EXCHANGE_CONFIGS, ExchangeConfig
+from symbol_mapper.ticker_aliases import normalize_base, TICKER_COLLISIONS
 
 logger = structlog.get_logger(__name__)
 
@@ -180,3 +183,109 @@ class SymbolMapper:
                 if common:
                     result[(a, b)] = common
         return result
+
+    # ------------------------------------------------------------------
+    # Quote-equivalence: USDT ↔ USDC cross-matching
+    # ------------------------------------------------------------------
+
+    # Stablecoins considered equivalent for spread detection.
+    # They trade near $1 parity so cross-quote spreads are valid.
+    EQUIVALENT_QUOTES: list[set[str]] = [{"USDT", "USDC", "BUSD"}]
+
+    @staticmethod
+    def extract_base(canonical: str) -> str | None:
+        """Extract base asset from canonical symbol. 'APE-USDT-PERP' → 'APE'."""
+        parts = canonical.split("-")
+        if len(parts) != 3 or parts[2] != "PERP":
+            return None
+        return parts[0]
+
+    @staticmethod
+    def extract_quote(canonical: str) -> str | None:
+        """Extract quote asset from canonical symbol. 'APE-USDT-PERP' → 'USDT'."""
+        parts = canonical.split("-")
+        if len(parts) != 3 or parts[2] != "PERP":
+            return None
+        return parts[1]
+
+    @classmethod
+    def are_quotes_equivalent(cls, quote_a: str, quote_b: str) -> bool:
+        """Check if two quote currencies are considered equivalent."""
+        if quote_a == quote_b:
+            return True
+        for group in cls.EQUIVALENT_QUOTES:
+            if quote_a in group and quote_b in group:
+                return True
+        return False
+
+    def get_matchable_pairs(self) -> list[dict]:
+        """
+        Find all cross-exchange symbol pairs that can be compared for spreads,
+        including:
+        - Pairs with equivalent but different quote currencies
+          (e.g. APE-USDT-PERP on Binance vs APE-USDC-PERP on Hyperliquid)
+        - Pairs where the same asset has different tickers across exchanges
+          (e.g. 1000PEPE on Binance vs PEPE on Hyperliquid,
+           MATIC on one exchange vs POL on another)
+
+        Returns:
+            List of dicts:
+              {"base": "PEPE",
+               "exchange_a": "binance", "canonical_a": "1000PEPE-USDT-PERP",
+               "exchange_b": "hyperliquid", "canonical_b": "PEPE-USDC-PERP"}
+        """
+        # Build: exchange -> {normalized_base: canonical_symbol}
+        # Uses ticker aliases so e.g. 1000PEPE and PEPE both normalize to "PEPE"
+        # Skips tickers known to collide (same name, different token) across exchanges
+        exchange_bases: dict[str, dict[str, str]] = {}
+        skipped_collisions: list[str] = []
+        for exchange in self._exchange_names:
+            bases: dict[str, str] = {}
+            for canonical in self.get_exchange_symbols(exchange):
+                base = self.extract_base(canonical)
+                quote = self.extract_quote(canonical)
+                if base and quote:
+                    # Normalize base asset name using alias map
+                    normalized = normalize_base(base)
+                    # Skip known ticker collisions
+                    if normalized in TICKER_COLLISIONS:
+                        if normalized not in skipped_collisions:
+                            skipped_collisions.append(normalized)
+                        continue
+                    bases[normalized] = canonical
+            exchange_bases[exchange] = bases
+
+        if skipped_collisions:
+            logger.info(
+                "ticker_collisions_skipped",
+                count=len(skipped_collisions),
+                tickers=skipped_collisions[:10],
+            )
+
+        pairs: list[dict] = []
+        names = [n for n in self._exchange_names if n in exchange_bases]
+
+        for i, ex_a in enumerate(names):
+            for ex_b in names[i + 1:]:
+                bases_a = exchange_bases[ex_a]
+                bases_b = exchange_bases[ex_b]
+
+                # Find common normalized base assets
+                common_bases = set(bases_a.keys()) & set(bases_b.keys())
+                for norm_base in common_bases:
+                    canon_a = bases_a[norm_base]
+                    canon_b = bases_b[norm_base]
+                    quote_a = self.extract_quote(canon_a)
+                    quote_b = self.extract_quote(canon_b)
+
+                    if quote_a and quote_b and self.are_quotes_equivalent(quote_a, quote_b):
+                        pairs.append({
+                            "base": norm_base,
+                            "exchange_a": ex_a,
+                            "canonical_a": canon_a,
+                            "exchange_b": ex_b,
+                            "canonical_b": canon_b,
+                        })
+
+        logger.info("matchable_pairs_found", count=len(pairs))
+        return pairs

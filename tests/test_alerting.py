@@ -137,11 +137,11 @@ class TestFormatAlert:
         assert "1.2350" in msg.replace("\\", "")
         assert "1.2480" in msg.replace("\\", "")
 
-    def test_contains_spread_bps(self):
+    def test_contains_spread_pct(self):
         msg = format_alert(make_opp())
         unescaped = msg.replace("\\", "")
-        assert "105.3" in unescaped  # gross
-        assert "72.9" in unescaped   # net
+        assert "1.05%" in unescaped  # gross (105.3 bps = 1.05%)
+        assert "0.73%" in unescaped  # net (72.9 bps = 0.73%)
 
     def test_contains_funding_rates(self):
         msg = format_alert(make_opp())

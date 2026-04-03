@@ -107,6 +107,24 @@ class TestCalculateSpread:
         opps = calculate_spread(snap_a, snap_b, now=NOW)
         assert len(opps) == 0
 
+    def test_cross_quote_same_base_works(self):
+        """USDT vs USDC with same base asset should calculate spreads."""
+        snap_a = make_snap(exchange="binance", canonical_symbol="APE-USDT-PERP", ask="1.2000")
+        snap_b = make_snap(exchange="hyperliquid", canonical_symbol="APE-USDC-PERP", bid="1.2100")
+
+        opps = calculate_spread(snap_a, snap_b, now=NOW)
+        buy_on_a = [o for o in opps if o.buy_exchange == "binance"]
+        assert len(buy_on_a) == 1
+        assert buy_on_a[0].gross_spread == Decimal("0.0100")
+
+    def test_cross_quote_different_base_rejected(self):
+        """Different base assets should still be rejected even with equivalent quotes."""
+        snap_a = make_snap(canonical_symbol="APE-USDT-PERP")
+        snap_b = make_snap(canonical_symbol="DOGE-USDC-PERP")
+
+        opps = calculate_spread(snap_a, snap_b, now=NOW)
+        assert len(opps) == 0
+
     def test_gross_spread_bps_formula(self):
         """Verify: gross_spread_bps = (gross_spread / buy_ask) * 10000"""
         snap_a = make_snap(exchange="binance", ask="1.0000")

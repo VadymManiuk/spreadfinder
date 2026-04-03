@@ -18,6 +18,7 @@ from filters.opportunity_filters import (
     CooldownFilter,
     PersistenceFilter,
     check_min_gross_spread,
+    check_max_gross_spread,
     check_min_net_spread,
     check_min_bid_size,
     check_min_ask_size,
@@ -47,6 +48,7 @@ class FilterChain:
     def __init__(
         self,
         min_gross_spread_bps: Decimal = Decimal("10.0"),
+        max_gross_spread_bps: Decimal = Decimal("500.0"),
         min_net_spread_bps: Decimal = Decimal("5.0"),
         min_bid_size: Decimal = Decimal("100.0"),
         min_ask_size: Decimal = Decimal("100.0"),
@@ -57,6 +59,7 @@ class FilterChain:
         persistence_ms: int = 1000,
     ):
         self.min_gross_spread_bps = min_gross_spread_bps
+        self.max_gross_spread_bps = max_gross_spread_bps
         self.min_net_spread_bps = min_net_spread_bps
         self.min_bid_size = min_bid_size
         self.min_ask_size = min_ask_size
@@ -79,6 +82,7 @@ class FilterChain:
 
         checks = [
             lambda: check_min_gross_spread(opp, self.min_gross_spread_bps),
+            lambda: check_max_gross_spread(opp, self.max_gross_spread_bps),
             lambda: check_min_net_spread(opp, self.min_net_spread_bps),
             lambda: check_min_bid_size(opp, self.min_bid_size),
             lambda: check_min_ask_size(opp, self.min_ask_size),

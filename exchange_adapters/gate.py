@@ -70,74 +70,110 @@ class GateAdapter(BaseExchangeAdapter):
         )
         self._symbols = symbols
         self._canonical_map = canonical_map or {}
-        self._ws: websockets.WebSocketClientProtocol | None = None
         self._meta_task: asyncio.Task | None = None
         self._http_session: aiohttp.ClientSession | None = None
+
+        # Split symbols into chunks that fit within the subscription limit
+        self._symbol_chunks: list[list[str]] = [
+            symbols[i:i + MAX_SUBS_PER_CONN]
+            for i in range(0, len(symbols), MAX_SUBS_PER_CONN)
+        ]
+
+        # One WebSocket per chunk
+        self._ws_connections: list[websockets.WebSocketClientProtocol | None] = [
+            None for _ in self._symbol_chunks
+        ]
 
         # In-memory state per symbol
         self._state: dict[str, dict] = {}
 
-        if len(symbols) > MAX_SUBS_PER_CONN:
-            self._log.warning(
-                "too_many_subscriptions",
-                count=len(symbols),
-                max=MAX_SUBS_PER_CONN,
-                hint="Split symbols across multiple connections",
-            )
+        self._log.info(
+            "gate_adapter_init",
+            total_symbols=len(symbols),
+            connections_needed=len(self._symbol_chunks),
+            symbols_per_conn=[len(c) for c in self._symbol_chunks],
+        )
 
     async def _connect(self) -> None:
-        """Establish WebSocket connection to Gate futures."""
-        self._log.info("connecting", url=WS_URL, symbol_count=len(self._symbols))
-        self._ws = await websockets.connect(
-            WS_URL,
-            ping_interval=20,
-            ping_timeout=10,
-            close_timeout=5,
-        )
+        """Establish WebSocket connections to Gate futures (one per chunk)."""
         self._http_session = aiohttp.ClientSession()
-        self._log.info("connected")
+        for i, chunk in enumerate(self._symbol_chunks):
+            self._log.info(
+                "connecting",
+                connection=f"{i + 1}/{len(self._symbol_chunks)}",
+                symbol_count=len(chunk),
+            )
+            ws = await websockets.connect(
+                WS_URL,
+                ping_interval=20,
+                ping_timeout=10,
+                close_timeout=5,
+            )
+            self._ws_connections[i] = ws
+            self._log.info("connected", connection=f"{i + 1}/{len(self._symbol_chunks)}")
 
     async def _disconnect(self) -> None:
-        """Close WebSocket and HTTP session."""
+        """Close all WebSocket connections and HTTP session."""
         if self._meta_task:
             self._meta_task.cancel()
             self._meta_task = None
-        if self._ws:
-            await self._ws.close()
-            self._ws = None
+        for i, ws in enumerate(self._ws_connections):
+            if ws:
+                await ws.close()
+                self._ws_connections[i] = None
         if self._http_session:
             await self._http_session.close()
             self._http_session = None
 
     async def _subscribe(self) -> None:
         """
-        Subscribe to futures.book_ticker for all symbols.
+        Subscribe to futures.book_ticker on each connection for its symbol chunk.
 
         Gate subscription format:
           {"time": <unix_ts>, "channel": "futures.book_ticker",
            "event": "subscribe", "payload": ["BTC_USDT", "APE_USDT"]}
         """
-        if not self._ws:
-            return
+        for i, (ws, chunk) in enumerate(zip(self._ws_connections, self._symbol_chunks)):
+            if not ws:
+                continue
 
-        msg = {
-            "time": int(time.time()),
-            "channel": "futures.book_ticker",
-            "event": "subscribe",
-            "payload": self._symbols,
-        }
-        await self._ws.send(json.dumps(msg))
-        self._log.debug("subscribed", symbols=self._symbols)
+            msg = {
+                "time": int(time.time()),
+                "channel": "futures.book_ticker",
+                "event": "subscribe",
+                "payload": chunk,
+            }
+            await ws.send(json.dumps(msg))
+            self._log.debug("subscribed", connection=i, symbol_count=len(chunk))
 
         # Start periodic meta polling
         self._meta_task = asyncio.create_task(self._meta_poll_loop())
 
     async def _listen(self) -> None:
-        """Receive and process WebSocket messages."""
-        if not self._ws:
+        """Receive and process messages from all connections concurrently."""
+        tasks = [
+            asyncio.create_task(self._listen_one(i))
+            for i in range(len(self._ws_connections))
+        ]
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        for task in done:
+            exc = task.exception()
+            if exc:
+                raise exc
+
+    async def _listen_one(self, conn_index: int) -> None:
+        """Receive and process WebSocket messages from a single connection."""
+        ws = self._ws_connections[conn_index]
+        if not ws:
             return
 
-        async for raw_message in self._ws:
+        async for raw_message in ws:
             self._update_heartbeat()
             try:
                 message = json.loads(raw_message)

@@ -96,6 +96,21 @@ def check_max_data_age(opp: SpreadOpportunity, max_age_ms: int) -> FilterResult:
     return FilterResult(True, "max_data_age")
 
 
+def check_max_gross_spread(opp: SpreadOpportunity, max_bps: Decimal) -> FilterResult:
+    """
+    Reject if gross spread is absurdly high — likely bad/stale data.
+
+    Spreads above 500 bps (5%) on perpetual futures are almost certainly
+    caused by stale quotes or exchange glitches, not real opportunities.
+    """
+    if opp.gross_spread_bps > max_bps:
+        return FilterResult(
+            False, "max_gross_spread",
+            f"gross_spread_bps={opp.gross_spread_bps:.1f} > {max_bps} (likely bad data)",
+        )
+    return FilterResult(True, "max_gross_spread")
+
+
 def check_min_confidence(opp: SpreadOpportunity, min_conf: Decimal) -> FilterResult:
     """Reject if confidence score is below threshold."""
     if opp.confidence < min_conf:
@@ -108,9 +123,10 @@ def check_min_confidence(opp: SpreadOpportunity, min_conf: Decimal) -> FilterRes
 
 class CooldownFilter:
     """
-    Prevents alert spam by enforcing a cooldown per symbol+exchange pair.
+    Prevents alert spam by enforcing a cooldown per symbol.
 
-    Key format: "{symbol}:{buy_exchange}:{sell_exchange}"
+    Key format: "{symbol}" — direction-independent so the same token
+    can't spam alerts from different exchange pairs.
     """
 
     def __init__(self, cooldown_seconds: int):
@@ -119,7 +135,9 @@ class CooldownFilter:
         self._last_alert: dict[str, float] = {}
 
     def _make_key(self, opp: SpreadOpportunity) -> str:
-        return f"{opp.canonical_symbol}:{opp.buy_exchange}:{opp.sell_exchange}"
+        # Use symbol only — no direction, no exchange pair.
+        # This prevents DRIFT alerting twice (binance→gate AND gate→binance).
+        return opp.canonical_symbol
 
     def check(self, opp: SpreadOpportunity) -> FilterResult:
         """Reject if the same pair was alerted within cooldown period."""

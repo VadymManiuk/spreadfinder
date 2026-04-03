@@ -49,6 +49,7 @@ class BinanceAdapter(BaseExchangeAdapter):
 
     Two streams per symbol means N symbols = 2N streams.
     With 300 stream limit, max ~150 symbols per connection.
+    Automatically splits into multiple connections when needed.
     """
 
     def __init__(
@@ -73,82 +74,130 @@ class BinanceAdapter(BaseExchangeAdapter):
         )
         self._symbols = symbols
         self._canonical_map = canonical_map or {}
-        self._ws: websockets.WebSocketClientProtocol | None = None
-        self._ping_task: asyncio.Task | None = None
+
+        # Split symbols into chunks that fit within the stream limit
+        # 2 streams per symbol (bookTicker + markPrice), max 300 streams per conn
+        max_symbols_per_conn = MAX_STREAMS_PER_CONN // 2  # 150
+        self._symbol_chunks: list[list[str]] = [
+            symbols[i:i + max_symbols_per_conn]
+            for i in range(0, len(symbols), max_symbols_per_conn)
+        ]
+
+        # One WebSocket per chunk
+        self._ws_connections: list[websockets.WebSocketClientProtocol | None] = [
+            None for _ in self._symbol_chunks
+        ]
+        self._ping_tasks: list[asyncio.Task | None] = [
+            None for _ in self._symbol_chunks
+        ]
 
         # In-memory state: latest data per symbol, merged from multiple streams
         # {native_symbol: {field: value}}
         self._state: dict[str, dict] = {}
 
-        # Validate stream count
-        stream_count = len(symbols) * 2  # bookTicker + markPrice per symbol
-        if stream_count > MAX_STREAMS_PER_CONN:
-            self._log.warning(
-                "too_many_streams",
-                stream_count=stream_count,
-                max=MAX_STREAMS_PER_CONN,
-                hint="Split symbols across multiple connections",
-            )
+        self._log.info(
+            "binance_adapter_init",
+            total_symbols=len(symbols),
+            connections_needed=len(self._symbol_chunks),
+            symbols_per_conn=[len(c) for c in self._symbol_chunks],
+        )
 
-    def _build_ws_url(self) -> str:
+    @staticmethod
+    def _build_ws_url_for_symbols(symbols: list[str]) -> str:
         """
-        Build combined stream URL for all symbols.
+        Build combined stream URL for a chunk of symbols.
 
         Format: wss://fstream.binance.com/stream?streams=btcusdt@bookTicker/btcusdt@markPrice/...
         """
         streams = []
-        for sym in self._symbols:
+        for sym in symbols:
             lower = sym.lower()
             streams.append(f"{lower}@bookTicker")
             streams.append(f"{lower}@markPrice")
         return f"{WS_BASE}/stream?streams={'/'.join(streams)}"
 
+    def _build_ws_url(self) -> str:
+        """Build URL for the first chunk (used by base class logging)."""
+        return self._build_ws_url_for_symbols(self._symbol_chunks[0]) if self._symbol_chunks else ""
+
     async def _connect(self) -> None:
-        """Establish WebSocket connection to Binance combined stream."""
-        url = self._build_ws_url()
-        self._log.info("connecting", url=url[:80] + "...", symbol_count=len(self._symbols))
-        self._ws = await websockets.connect(
-            url,
-            ping_interval=None,  # we handle pings ourselves
-            ping_timeout=None,
-            close_timeout=5,
-        )
-        self._log.info("connected")
+        """Establish WebSocket connections to Binance (one per chunk)."""
+        for i, chunk in enumerate(self._symbol_chunks):
+            url = self._build_ws_url_for_symbols(chunk)
+            self._log.info(
+                "connecting",
+                connection=f"{i + 1}/{len(self._symbol_chunks)}",
+                symbol_count=len(chunk),
+                stream_count=len(chunk) * 2,
+            )
+            ws = await websockets.connect(
+                url,
+                ping_interval=None,  # we handle pings ourselves
+                ping_timeout=None,
+                close_timeout=5,
+            )
+            self._ws_connections[i] = ws
+            self._log.info("connected", connection=f"{i + 1}/{len(self._symbol_chunks)}")
 
     async def _disconnect(self) -> None:
-        """Close WebSocket connection."""
-        if self._ping_task:
-            self._ping_task.cancel()
-            self._ping_task = None
-        if self._ws:
-            await self._ws.close()
-            self._ws = None
+        """Close all WebSocket connections."""
+        for i, task in enumerate(self._ping_tasks):
+            if task:
+                task.cancel()
+                self._ping_tasks[i] = None
+        for i, ws in enumerate(self._ws_connections):
+            if ws:
+                await ws.close()
+                self._ws_connections[i] = None
 
     async def _subscribe(self) -> None:
         """
         No explicit subscribe needed — Binance combined stream URL acts as subscription.
-        Start the ping keep-alive task.
+        Start ping keep-alive tasks for each connection.
         """
-        self._ping_task = asyncio.create_task(self._ping_loop())
+        for i in range(len(self._ws_connections)):
+            self._ping_tasks[i] = asyncio.create_task(self._ping_loop(i))
 
-    async def _ping_loop(self) -> None:
-        """Send periodic pings to keep the connection alive."""
+    async def _ping_loop(self, conn_index: int) -> None:
+        """Send periodic pings to keep a connection alive."""
         while self._running:
             await asyncio.sleep(PING_INTERVAL_SECONDS)
-            if self._ws:
+            ws = self._ws_connections[conn_index]
+            if ws:
                 try:
-                    await self._ws.ping()
-                    self._log.debug("ping_sent")
+                    await ws.ping()
+                    self._log.debug("ping_sent", connection=conn_index)
                 except Exception:
-                    self._log.warning("ping_failed", exc_info=True)
+                    self._log.warning("ping_failed", connection=conn_index, exc_info=True)
                     return  # trigger reconnect
 
     async def _listen(self) -> None:
-        """Receive and process messages from the combined stream."""
-        if not self._ws:
+        """Receive and process messages from all connections concurrently."""
+        tasks = [
+            asyncio.create_task(self._listen_one(i))
+            for i in range(len(self._ws_connections))
+        ]
+        # If any connection dies, we exit to trigger reconnect
+        done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in pending:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+        # Re-raise any exception from the completed task
+        for task in done:
+            exc = task.exception()
+            if exc:
+                raise exc
+
+    async def _listen_one(self, conn_index: int) -> None:
+        """Receive and process messages from a single connection."""
+        ws = self._ws_connections[conn_index]
+        if not ws:
             return
 
-        async for raw_message in self._ws:
+        async for raw_message in ws:
             self._update_heartbeat()
             try:
                 message = json.loads(raw_message)
