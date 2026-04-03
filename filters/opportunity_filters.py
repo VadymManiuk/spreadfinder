@@ -123,10 +123,11 @@ def check_min_confidence(opp: SpreadOpportunity, min_conf: Decimal) -> FilterRes
 
 class CooldownFilter:
     """
-    Prevents alert spam by enforcing a cooldown per symbol.
+    Prevents alert spam by enforcing a cooldown per symbol and direction.
 
-    Key format: "{symbol}" — direction-independent so the same token
-    can't spam alerts from different exchange pairs.
+    Key format: "{symbol}:{buy_exchange}:{sell_exchange}" so the same
+    opportunity direction is suppressed, while the reverse direction or
+    a different exchange pair can still alert independently.
     """
 
     def __init__(self, cooldown_seconds: int):
@@ -135,9 +136,7 @@ class CooldownFilter:
         self._last_alert: dict[str, float] = {}
 
     def _make_key(self, opp: SpreadOpportunity) -> str:
-        # Use symbol only — no direction, no exchange pair.
-        # This prevents DRIFT alerting twice (binance→gate AND gate→binance).
-        return opp.canonical_symbol
+        return f"{opp.canonical_symbol}:{opp.buy_exchange}:{opp.sell_exchange}"
 
     def check(self, opp: SpreadOpportunity) -> FilterResult:
         """Reject if the same pair was alerted within cooldown period."""
