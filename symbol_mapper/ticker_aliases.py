@@ -98,6 +98,9 @@ TICKER_ALIASES: dict[str, str] = {
 # Format: {ticker: "reason why it's ambiguous"}
 # -----------------------------------------------------------------------
 TICKER_COLLISIONS: dict[str, str] = {
+    # --- Index / composite tokens (different underlyings per exchange) ---
+    "ALL": "Composite index token — different underlying baskets on Gate vs Binance",
+
     # --- Confirmed different projects using same ticker ---
     "BEAM": "Beam privacy coin (Mimblewimble, 2019) vs Beam gaming (Merit Circle rebrand, 2023)",
     "NEIRO": "Two competing Neiro meme tokens (different ETH contracts) listed on different exchanges in 2024",
