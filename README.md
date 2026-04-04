@@ -57,7 +57,7 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now spread-scanner-autodeploy.timer
 ```
 
-The timer checks `origin/main` every minute. On a new revision it runs `pip install -e .`, `pytest`, then restarts `spread-scanner.service`. If deploy validation fails, it rolls back to the previous revision.
+The timer checks `origin/main` every 5 minutes. On a new revision it runs `pip install -e .`, `pytest`, then restarts `spread-scanner.service`. If deploy validation fails, it rolls back to the previous revision.
 
 ## Architecture
 
