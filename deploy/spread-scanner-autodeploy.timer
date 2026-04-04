@@ -1,0 +1,12 @@
+[Unit]
+Description=Check GitHub for Spread Scanner updates
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+RandomizedDelaySec=15s
+Persistent=true
+Unit=spread-scanner-autodeploy.service
+
+[Install]
+WantedBy=timers.target

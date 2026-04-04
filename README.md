@@ -44,6 +44,21 @@ sudo cp spread-scanner.service /etc/systemd/system/
 sudo systemctl enable --now spread-scanner
 ```
 
+## Auto Deploy
+
+After you push `main` to GitHub, the VPS can pull and restart automatically with a systemd timer:
+
+```bash
+sudo cp deploy/spread-scanner-autodeploy.service /etc/systemd/system/
+sudo cp deploy/spread-scanner-autodeploy.timer /etc/systemd/system/
+sudo cp deploy/auto-deploy.sh /root/spreadfinder/deploy/auto-deploy.sh
+sudo chmod +x /root/spreadfinder/deploy/auto-deploy.sh
+sudo systemctl daemon-reload
+sudo systemctl enable --now spread-scanner-autodeploy.timer
+```
+
+The timer checks `origin/main` every minute. On a new revision it runs `pip install -e .`, `pytest`, then restarts `spread-scanner.service`. If deploy validation fails, it rolls back to the previous revision.
+
 ## Architecture
 
 ```

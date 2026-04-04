@@ -1,0 +1,10 @@
+[Unit]
+Description=Spread Scanner Auto-Deploy
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=root
+WorkingDirectory=/root/spreadfinder
+ExecStart=/root/spreadfinder/deploy/auto-deploy.sh
