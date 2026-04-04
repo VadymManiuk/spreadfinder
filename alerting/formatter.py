@@ -123,3 +123,81 @@ def format_alert(opp: SpreadOpportunity) -> str:
     ]
 
     return "\n".join(lines)
+
+
+def _format_route(opp: SpreadOpportunity, idx: int) -> str:
+    """
+    Format one route line for a grouped alert.
+
+    Layout:
+      #{idx}  BUY exchange → SELL exchange
+            Net: 2.15% | Gross: 2.28%
+            Buy @ 0.2067 | Sell @ 0.2115
+            Sizes: 100.00 / 50.00 | Conf: 0.86
+    """
+    buy_ex = escape_md2(opp.buy_exchange.upper())
+    sell_ex = escape_md2(opp.sell_exchange.upper())
+    buy_ask = escape_md2(_fmt_decimal(opp.buy_ask))
+    sell_bid = escape_md2(_fmt_decimal(opp.sell_bid))
+    gross_pct = escape_md2(_fmt_pct(opp.gross_spread_bps))
+    net_pct = escape_md2(_fmt_pct(opp.net_spread_bps))
+    ask_size = escape_md2(_fmt_decimal(opp.buy_ask_size, 2))
+    bid_size = escape_md2(_fmt_decimal(opp.sell_bid_size, 2))
+    conf = escape_md2(f"{opp.confidence:.2f}")
+    num = escape_md2(f"#{idx}")
+
+    lines = [
+        f"  {num}  *{buy_ex}* → *{sell_ex}*",
+        f"        Net: *{net_pct}* \\| Gross: {gross_pct}",
+        f"        Buy @ `{buy_ask}` \\| Sell @ `{sell_bid}`",
+        f"        Sizes: {ask_size} / {bid_size} \\| Conf: {conf}",
+    ]
+    return "\n".join(lines)
+
+
+def format_grouped_alert(opps: list[SpreadOpportunity]) -> str:
+    """
+    Format multiple routes for the same base token into ONE message.
+
+    Opportunities should be pre-sorted by net_spread_bps descending (best first).
+
+    Layout:
+      🔔 SPREAD ALERT: POLYX
+      5 routes found
+
+      #1  BUY BINANCE → SELL GATE
+            Net: 2.45% | Gross: 2.57%
+            ...
+      #2  BUY ASTER → SELL GATE
+            ...
+      ⏱ 08:54:51 UTC
+    """
+    if not opps:
+        return ""
+
+    # Use the first opp (best spread) for the header symbol
+    best = opps[0]
+
+    # Extract base token name from canonical_symbol (e.g. "POLYX-USDT-PERP" → "POLYX")
+    base = best.canonical_symbol.split("-")[0] if "-" in best.canonical_symbol else best.canonical_symbol
+    symbol = escape_md2(base)
+
+    count = escape_md2(str(len(opps)))
+    ts = escape_md2(best.timestamp.strftime("%H:%M:%S UTC"))
+
+    # Best net spread for the header
+    best_net = escape_md2(_fmt_pct(best.net_spread_bps))
+
+    lines = [
+        f"🔔 *SPREAD ALERT: {symbol}*",
+        f"📊 {count} routes \\| Best: *{best_net}* net",
+        "",
+    ]
+
+    for i, opp in enumerate(opps, 1):
+        lines.append(_format_route(opp, i))
+        lines.append("")  # blank line between routes
+
+    lines.append(f"⏱ {ts}")
+
+    return "\n".join(lines)

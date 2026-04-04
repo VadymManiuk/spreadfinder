@@ -100,6 +100,10 @@ class SpreadScanner:
       4. Filter opportunities and send Telegram alerts
     """
 
+    # How long to batch routes for the same base token before sending
+    # one combined alert. Allows multiple exchange pairs to accumulate.
+    BATCH_WINDOW_SECONDS: float = 3.0
+
     def __init__(self, settings: Settings):
         self.settings = settings
         self._running = False
@@ -116,6 +120,12 @@ class SpreadScanner:
         # Maps (exchange, canonical) -> list of (other_exchange, other_canonical)
         # to know which snapshots to compare for spreads.
         self._match_lookup: dict[tuple[str, str], list[tuple[str, str]]] = {}
+
+        # Alert batching: accumulate routes per base token, flush after window.
+        # base_token -> list of SpreadOpportunity
+        self._alert_buffer: dict[str, list] = {}
+        # base_token -> asyncio.Task that will flush after BATCH_WINDOW_SECONDS
+        self._flush_tasks: dict[str, asyncio.Task] = {}
 
         # Components
         self._mapper = SymbolMapper(exchanges=settings.enabled_exchanges)
@@ -143,12 +153,17 @@ class SpreadScanner:
         )
         self._adapters: list = []
 
+    def _extract_base(self, canonical: str) -> str:
+        """Extract base token from canonical symbol. 'POLYX-USDT-PERP' → 'POLYX'."""
+        return canonical.split("-")[0] if "-" in canonical else canonical
+
     async def _on_snapshot(self, snapshot: MarketSnapshot) -> None:
         """
         Callback invoked by exchange adapters on each new market snapshot.
 
         Stores the snapshot and checks for spread opportunities against
         all matchable counterparts (including cross-quote like USDT↔USDC).
+        Batches routes by base token and sends one grouped alert per token.
         """
         key = (snapshot.exchange, snapshot.canonical_symbol)
         self._snapshots[key] = snapshot
@@ -184,19 +199,53 @@ class SpreadScanner:
                 if not passed:
                     continue
 
+                # Record cooldown immediately so duplicate routes don't pass
                 self._filter_chain.record_alert(opp)
+
+                # Buffer the route — will be flushed as a grouped alert
+                base = self._extract_base(opp.canonical_symbol)
+                self._alert_buffer.setdefault(base, []).append(opp)
+
                 logger.info(
-                    "spread_alert",
+                    "route_buffered",
+                    base=base,
                     symbol=opp.canonical_symbol,
                     buy=opp.buy_exchange,
                     sell=opp.sell_exchange,
-                    buy_ask=str(opp.buy_ask),
-                    sell_bid=str(opp.sell_bid),
-                    gross_pct=round(float(opp.gross_spread_bps) / 100, 2),
                     net_pct=round(net_pct, 2),
-                    confidence=float(opp.confidence),
+                    buffered_routes=len(self._alert_buffer[base]),
                 )
-                await self._telegram.send_alert(opp)
+
+                # Start a flush timer for this base token if not already running
+                if base not in self._flush_tasks or self._flush_tasks[base].done():
+                    self._flush_tasks[base] = asyncio.create_task(
+                        self._flush_after_delay(base)
+                    )
+
+    async def _flush_after_delay(self, base: str) -> None:
+        """
+        Wait for the batch window, then send all buffered routes
+        for this base token as one grouped Telegram alert.
+        """
+        await asyncio.sleep(self.BATCH_WINDOW_SECONDS)
+
+        routes = self._alert_buffer.pop(base, [])
+        self._flush_tasks.pop(base, None)
+
+        if not routes:
+            return
+
+        # Sort by net spread descending (best route first)
+        routes.sort(key=lambda o: float(o.net_spread_bps), reverse=True)
+
+        logger.info(
+            "flushing_grouped_alert",
+            base=base,
+            route_count=len(routes),
+            best_net_pct=round(float(routes[0].net_spread_bps) / 100, 2),
+        )
+
+        await self._telegram.send_grouped_alert(routes)
 
     def _build_adapters(self) -> None:
         """Create exchange adapters based on symbol mapper results."""

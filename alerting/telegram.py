@@ -19,7 +19,7 @@ import aiohttp
 import structlog
 
 from models.snapshot import SpreadOpportunity
-from alerting.formatter import format_alert
+from alerting.formatter import format_alert, format_grouped_alert
 
 logger = structlog.get_logger(__name__)
 
@@ -184,6 +184,25 @@ class TelegramSender:
 
         message = format_alert(opp)
         # No inline keyboard on alerts — settings are in /filter panel only
+        return await self._send_message(message)
+
+    async def send_grouped_alert(self, opps: list[SpreadOpportunity]) -> bool:
+        """
+        Send a grouped alert with multiple routes for the same base token.
+        Filters each route individually; sends only those that pass.
+        """
+        if not self._is_configured():
+            return False
+
+        # Filter: only routes that pass the chat's min spread filter
+        passing = [o for o in opps if self.passes_filter(o)]
+        if not passing:
+            return False
+
+        # Sort by net spread descending (best first)
+        passing.sort(key=lambda o: float(o.net_spread_bps), reverse=True)
+
+        message = format_grouped_alert(passing)
         return await self._send_message(message)
 
     async def _send_message(
