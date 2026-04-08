@@ -190,11 +190,12 @@ class TelegramSender:
         self,
         opps: list[SpreadOpportunity],
         deposit_status: dict | None = None,
+        all_snapshots: dict | None = None,
     ) -> bool:
         """
         Send a grouped alert with multiple routes for the same base token.
         Filters each route individually; sends only those that pass.
-        Includes funding info and deposit/withdrawal status.
+        Includes funding info, deposit/withdrawal status, and all exchange prices.
         """
         if not self._is_configured():
             return False
@@ -207,7 +208,11 @@ class TelegramSender:
         # Sort by net spread descending (best first)
         passing.sort(key=lambda o: float(o.net_spread_bps), reverse=True)
 
-        message = format_grouped_alert(passing, deposit_status=deposit_status)
+        message = format_grouped_alert(
+            passing,
+            deposit_status=deposit_status,
+            all_snapshots=all_snapshots,
+        )
         return await self._send_message(message)
 
     async def _send_message(

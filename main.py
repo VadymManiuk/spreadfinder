@@ -230,7 +230,7 @@ class SpreadScanner:
         """
         Wait for the batch window, then send all buffered routes
         for this base token as one grouped Telegram alert.
-        Enriches with deposit/withdrawal status from the checker.
+        Enriches with deposit/withdrawal status and all exchange snapshots.
         """
         await asyncio.sleep(self.BATCH_WINDOW_SECONDS)
 
@@ -243,22 +243,42 @@ class SpreadScanner:
         # Sort by net spread descending (best route first)
         routes.sort(key=lambda o: float(o.net_spread_bps), reverse=True)
 
-        # Build deposit status dict for all exchanges in these routes
+        # Gather ALL exchange snapshots for this base token
+        # Used by the formatter to build the "All exchanges" table
+        all_snapshots: dict[str, MarketSnapshot] = {}
+        for (ex, canonical), snap in self._snapshots.items():
+            snap_base = self._extract_base(canonical)
+            if snap_base == base:
+                # If multiple canonicals per exchange (USDT vs USDC),
+                # keep the most recent one
+                existing = all_snapshots.get(ex)
+                if existing is None or snap.local_ts > existing.local_ts:
+                    all_snapshots[ex] = snap
+
+        # Build deposit status dict for all exchanges with snapshots
         deposit_status = {}
+        all_exchanges = set(all_snapshots.keys())
         for opp in routes:
-            for ex in (opp.buy_exchange, opp.sell_exchange):
-                key = (ex, base)
-                if key not in deposit_status:
-                    deposit_status[key] = self._deposit_checker.get_status(ex, base)
+            all_exchanges.add(opp.buy_exchange)
+            all_exchanges.add(opp.sell_exchange)
+        for ex in all_exchanges:
+            key = (ex, base)
+            if key not in deposit_status:
+                deposit_status[key] = self._deposit_checker.get_status(ex, base)
 
         logger.info(
             "flushing_grouped_alert",
             base=base,
             route_count=len(routes),
+            exchanges_with_snapshots=len(all_snapshots),
             best_net_pct=round(float(routes[0].net_spread_bps) / 100, 2),
         )
 
-        await self._telegram.send_grouped_alert(routes, deposit_status=deposit_status)
+        await self._telegram.send_grouped_alert(
+            routes,
+            deposit_status=deposit_status,
+            all_snapshots=all_snapshots,
+        )
 
     def _build_adapters(self) -> None:
         """Create exchange adapters based on symbol mapper results."""
