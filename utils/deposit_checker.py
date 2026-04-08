@@ -4,9 +4,9 @@ Deposit/withdrawal availability checker for exchange tokens.
 Inputs: Exchange name, base token ticker.
 Outputs: {"deposit": bool|None, "withdraw": bool|None} — None = unknown.
 Assumptions:
-  - Gate and Bitget have public (no API key) endpoints for coin status.
+  - Binance, Gate, and Bitget have public (no API key) endpoints for coin status.
   - DEXes (Hyperliquid, Aster, Lighter) are always available (bridge-based).
-  - Binance, Bybit, OKX need API keys — returns None (unknown) for these.
+  - Bybit, OKX need API keys — returns None (unknown) for these.
   - Refreshed every 5 minutes to catch chain suspensions.
 """
 
@@ -96,9 +96,10 @@ class DepositChecker:
                 logger.exception("deposit_checker_refresh_error")
 
     async def _refresh(self) -> None:
-        timeout = aiohttp.ClientTimeout(total=15)
+        timeout = aiohttp.ClientTimeout(total=20)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             results = await asyncio.gather(
+                self._fetch_binance(session),
                 self._fetch_gate(session),
                 self._fetch_bitget(session),
                 return_exceptions=True,
@@ -108,6 +109,31 @@ class DepositChecker:
                     logger.warning("deposit_fetch_error", error=str(r))
 
         logger.info("deposit_status_refreshed", total_coins=len(self._status))
+
+    async def _fetch_binance(self, session: aiohttp.ClientSession) -> None:
+        """
+        Binance public web API (no API key needed):
+        GET /bapi/capital/v1/public/capital/getNetworkCoinAll
+        Returns array of {coin, depositAllEnable, withdrawAllEnable, networkList: [...]}
+        """
+        url = "https://www.binance.com/bapi/capital/v1/public/capital/getNetworkCoinAll"
+        async with session.get(url) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+
+        count = 0
+        for coin_info in data.get("data", []):
+            ticker = coin_info.get("coin", "").upper()
+            if not ticker:
+                continue
+            deposit_ok = coin_info.get("depositAllEnable", False)
+            withdraw_ok = coin_info.get("withdrawAllEnable", False)
+            self._status[("binance", ticker)] = CoinStatus(
+                deposit=bool(deposit_ok), withdraw=bool(withdraw_ok)
+            )
+            count += 1
+
+        logger.info("binance_deposit_status_fetched", coins=count)
 
     async def _fetch_gate(self, session: aiohttp.ClientSession) -> None:
         """
