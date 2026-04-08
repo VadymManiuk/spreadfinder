@@ -4,9 +4,10 @@ Deposit/withdrawal availability checker for exchange tokens.
 Inputs: Exchange name, base token ticker.
 Outputs: {"deposit": bool|None, "withdraw": bool|None} — None = unknown.
 Assumptions:
-  - Binance, Gate, and Bitget have public (no API key) endpoints for coin status.
+  - Binance, Gate, Bitget, and Bybit have public (no API key) endpoints.
   - DEXes (Hyperliquid, Aster, Lighter) are always available (bridge-based).
-  - Bybit, OKX need API keys — returns None (unknown) for these.
+  - OKX has no public coin-status endpoint — returns None (unknown).
+  - Bybit: deposit status from allowed-deposit-list; withdraw unknown.
   - Refreshed every 5 minutes to catch chain suspensions.
 """
 
@@ -47,10 +48,15 @@ class CoinStatus:
         return "⚪"
 
     def format_short(self) -> str:
-        """Compact format: '✅D ✅W' or '❌D ✅W' or '⚪'."""
+        """Compact format: '✅D ✅W' or '❌D ✅W' or '✅D' or '⚪'."""
         if self.deposit is None and self.withdraw is None:
             return "⚪"
-        return f"{self.deposit_symbol}D {self.withdraw_symbol}W"
+        parts = []
+        if self.deposit is not None:
+            parts.append(f"{self.deposit_symbol}D")
+        if self.withdraw is not None:
+            parts.append(f"{self.withdraw_symbol}W")
+        return " ".join(parts) if parts else "⚪"
 
 
 UNKNOWN = CoinStatus(deposit=None, withdraw=None)
@@ -96,12 +102,13 @@ class DepositChecker:
                 logger.exception("deposit_checker_refresh_error")
 
     async def _refresh(self) -> None:
-        timeout = aiohttp.ClientTimeout(total=20)
+        timeout = aiohttp.ClientTimeout(total=30)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             results = await asyncio.gather(
                 self._fetch_binance(session),
                 self._fetch_gate(session),
                 self._fetch_bitget(session),
+                self._fetch_bybit(session),
                 return_exceptions=True,
             )
             for r in results:
@@ -191,3 +198,50 @@ class DepositChecker:
             count += 1
 
         logger.info("bitget_deposit_status_fetched", coins=count)
+
+    async def _fetch_bybit(self, session: aiohttp.ClientSession) -> None:
+        """
+        Bybit public API (no auth needed):
+        GET /v5/asset/deposit/query-allowed-list
+        Returns paginated list of coins that are allowed for deposit.
+        Coins in the list → deposit enabled. Coins NOT in the list → deposit disabled.
+        Withdraw status is not available publicly.
+        """
+        deposit_coins: set[str] = set()
+        cursor = ""
+
+        # Paginate through all coins (up to 20 pages as safety limit)
+        for _ in range(20):
+            url = "https://api.bybit.com/v5/asset/deposit/query-allowed-list?limit=500"
+            if cursor:
+                url += f"&cursor={cursor}"
+
+            async with session.get(url) as resp:
+                resp.raise_for_status()
+                data = await resp.json()
+
+            result = data.get("result", {})
+            items = result.get("configList", [])
+            next_cursor = result.get("nextPageCursor", "")
+
+            for item in items:
+                coin = item.get("coin", "").upper()
+                if coin:
+                    deposit_coins.add(coin)
+
+            if not next_cursor or not items:
+                break
+            cursor = next_cursor
+
+        # Coins in the allowed list have deposit enabled
+        # For withdraw we don't have a public endpoint — mark as None
+        count = 0
+        for coin in deposit_coins:
+            existing = self._status.get(("bybit", coin))
+            self._status[("bybit", coin)] = CoinStatus(
+                deposit=True,
+                withdraw=existing.withdraw if existing else None,
+            )
+            count += 1
+
+        logger.info("bybit_deposit_status_fetched", coins=count)
