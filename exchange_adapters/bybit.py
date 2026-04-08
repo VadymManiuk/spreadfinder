@@ -165,6 +165,11 @@ class BybitAdapter(BaseExchangeAdapter):
         if "turnover24h" in data and data["turnover24h"]:
             state["volume_24h"] = Decimal(data["turnover24h"])
 
+        # next funding settlement time
+        nft = data.get("nextFundingTime")
+        if nft and nft != "0":
+            state["next_funding_time"] = datetime.fromtimestamp(int(nft) / 1000, tz=timezone.utc)
+
         # timestamp
         ts_ms = data.get("ts")
         if ts_ms:
@@ -194,6 +199,7 @@ class BybitAdapter(BaseExchangeAdapter):
             index_price=state.get("index_price"),
             funding_rate=state.get("funding_rate"),
             volume_24h=state.get("volume_24h"),
+            next_funding_time=state.get("next_funding_time"),
             is_stale=False,
         )
         await self.on_snapshot(snapshot)

@@ -191,6 +191,7 @@ class OkxAdapter(BaseExchangeAdapter):
             index_price=state.get("index_price"),
             funding_rate=state.get("funding_rate"),
             volume_24h=state.get("volume_24h"),
+            next_funding_time=state.get("next_funding_time"),
             is_stale=False,
         )
         await self.on_snapshot(snapshot)

@@ -114,19 +114,28 @@ def _dw_symbols(deposit_status: dict | None, exchange: str, base: str) -> str:
     return d + w
 
 
-def _next_funding_minutes(exchange: str) -> int:
+def _next_funding_minutes(exchange: str, snap: MarketSnapshot | None = None) -> int:
     """
-    Minutes until next funding settlement for an exchange.
-    Standard CEXes settle every 8h at 00:00, 08:00, 16:00 UTC.
-    Hyperliquid settles every 1h on the hour.
+    Minutes until next funding settlement.
+
+    Uses snap.next_funding_time from exchange API when available (most accurate).
+    Falls back to calculated estimate:
+      - Hyperliquid: 1h cycle on the hour
+      - CEXes without API data: 8h cycle at 00:00, 08:00, 16:00 UTC
     """
     now = datetime.now(timezone.utc)
 
+    # Prefer actual next_funding_time from exchange API (Binance, Bybit, Gate provide this)
+    if snap is not None and snap.next_funding_time is not None:
+        delta = (snap.next_funding_time - now).total_seconds() / 60
+        return max(1, int(delta))
+
+    # Fallback: calculated estimate
     if exchange == "hyperliquid":
         next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
         return max(1, int((next_hour - now).total_seconds() / 60))
 
-    # Standard 8h cycle: 00:00, 08:00, 16:00 UTC
+    # Standard 8h cycle: 00:00, 08:00, 16:00 UTC (fallback for exchanges without API data)
     current_hour = now.hour
     next_funding_hour = ((current_hour // 8) + 1) * 8
     if next_funding_hour >= 24:
@@ -270,7 +279,8 @@ def format_grouped_alert(
 
     funding_parts = []
     for ex in sorted(all_ex_set):
-        mins = _next_funding_minutes(ex)
+        snap = all_snapshots.get(ex) if all_snapshots else None
+        mins = _next_funding_minutes(ex, snap)
         funding_parts.append(f"{ex}:{_fmt_minutes(mins)}")
     lines.append(f"⏰ {_e(' | '.join(funding_parts))}")
     lines.append("")
@@ -399,7 +409,7 @@ def _build_exchange_rows(
             price_str = f"{price_f:.{prec}f}"
             vol_str = _fmt_vol(snap.volume_24h)
             fund_str = _fmt_funding_short(snap.funding_rate)
-            tfund_str = _fmt_minutes(_next_funding_minutes(ex))
+            tfund_str = _fmt_minutes(_next_funding_minutes(ex, snap))
 
             if ex == sell_ex:
                 spread_str = "sell"

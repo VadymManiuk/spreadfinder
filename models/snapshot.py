@@ -42,6 +42,9 @@ class MarketSnapshot(BaseModel, frozen=True):
     funding_rate: Decimal | None = None
     volume_24h: Decimal | None = None
 
+    # Next funding settlement time (from exchange API, not calculated)
+    next_funding_time: datetime | None = None
+
     # Staleness flag — set by adapter when no update received within threshold
     is_stale: bool = False
 

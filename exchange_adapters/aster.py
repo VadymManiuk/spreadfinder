@@ -170,6 +170,11 @@ class AsterAdapter(BaseExchangeAdapter):
         state["index_price"] = Decimal(data.get("i", "0"))
         state["funding_rate"] = Decimal(data.get("r", "0"))
 
+        # T = next funding settlement time (ms since epoch), same as Binance
+        nft = data.get("T")
+        if nft:
+            state["next_funding_time"] = datetime.fromtimestamp(int(nft) / 1000, tz=timezone.utc)
+
     async def _emit_snapshot(self, native_symbol: str) -> None:
         state = self._state.get(native_symbol, {})
         bid = state.get("bid")
@@ -190,6 +195,7 @@ class AsterAdapter(BaseExchangeAdapter):
             index_price=state.get("index_price"),
             funding_rate=state.get("funding_rate"),
             volume_24h=state.get("volume_24h"),
+            next_funding_time=state.get("next_funding_time"),
             is_stale=False,
         )
         await self.on_snapshot(snapshot)

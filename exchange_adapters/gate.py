@@ -280,6 +280,28 @@ class GateAdapter(BaseExchangeAdapter):
         except Exception:
             self._log.exception("ticker_fetch_error")
 
+        # Fetch contract info for next funding time
+        try:
+            async with self._http_session.get(
+                f"{REST_BASE}/contracts",
+            ) as resp:
+                resp.raise_for_status()
+                contracts = await resp.json()
+
+            for contract in contracts:
+                name = contract.get("name", "")
+                if name not in self._state:
+                    continue
+
+                nft = contract.get("funding_next_apply")
+                if nft:
+                    self._state[name]["next_funding_time"] = datetime.fromtimestamp(
+                        int(nft), tz=timezone.utc
+                    )
+
+        except Exception:
+            self._log.exception("contract_fetch_error")
+
     async def _emit_snapshot(self, native_symbol: str) -> None:
         """Build and emit a MarketSnapshot from the current merged state."""
         state = self._state.get(native_symbol, {})
@@ -304,6 +326,7 @@ class GateAdapter(BaseExchangeAdapter):
             index_price=state.get("index_price"),
             funding_rate=state.get("funding_rate"),
             volume_24h=state.get("volume_24h"),
+            next_funding_time=state.get("next_funding_time"),
             is_stale=False,
         )
 
