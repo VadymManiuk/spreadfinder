@@ -71,6 +71,7 @@ import structlog
 
 from config.settings import Settings
 from utils.logging import setup_logging
+from utils.deposit_checker import DepositChecker
 from symbol_mapper.mapper import SymbolMapper
 from exchange_adapters.binance import BinanceAdapter
 from exchange_adapters.hyperliquid import HyperliquidAdapter
@@ -126,6 +127,9 @@ class SpreadScanner:
         self._alert_buffer: dict[str, list] = {}
         # base_token -> asyncio.Task that will flush after BATCH_WINDOW_SECONDS
         self._flush_tasks: dict[str, asyncio.Task] = {}
+
+        # Deposit/withdrawal checker for alert enrichment
+        self._deposit_checker = DepositChecker()
 
         # Components
         self._mapper = SymbolMapper(exchanges=settings.enabled_exchanges)
@@ -226,6 +230,7 @@ class SpreadScanner:
         """
         Wait for the batch window, then send all buffered routes
         for this base token as one grouped Telegram alert.
+        Enriches with deposit/withdrawal status from the checker.
         """
         await asyncio.sleep(self.BATCH_WINDOW_SECONDS)
 
@@ -238,6 +243,14 @@ class SpreadScanner:
         # Sort by net spread descending (best route first)
         routes.sort(key=lambda o: float(o.net_spread_bps), reverse=True)
 
+        # Build deposit status dict for all exchanges in these routes
+        deposit_status = {}
+        for opp in routes:
+            for ex in (opp.buy_exchange, opp.sell_exchange):
+                key = (ex, base)
+                if key not in deposit_status:
+                    deposit_status[key] = self._deposit_checker.get_status(ex, base)
+
         logger.info(
             "flushing_grouped_alert",
             base=base,
@@ -245,7 +258,7 @@ class SpreadScanner:
             best_net_pct=round(float(routes[0].net_spread_bps) / 100, 2),
         )
 
-        await self._telegram.send_grouped_alert(routes)
+        await self._telegram.send_grouped_alert(routes, deposit_status=deposit_status)
 
     def _build_adapters(self) -> None:
         """Create exchange adapters based on symbol mapper results."""
@@ -368,10 +381,13 @@ class SpreadScanner:
             logger.error("no_adapters_created", hint="Check exchange configs and symbol availability")
             return
 
-        # Step 3: Start Telegram polling (for inline button callbacks)
+        # Step 3: Start deposit/withdrawal checker
+        await self._deposit_checker.start()
+
+        # Step 4: Start Telegram polling (for inline button callbacks)
         await self._telegram.start_polling()
 
-        # Step 4: Run all adapters concurrently
+        # Step 5: Run all adapters concurrently
         logger.info("starting_adapters", count=len(self._adapters))
         tasks = [asyncio.create_task(adapter.start()) for adapter in self._adapters]
 
@@ -388,6 +404,7 @@ class SpreadScanner:
         for adapter in self._adapters:
             await adapter.stop()
 
+        await self._deposit_checker.stop()
         await self._telegram.close()
         logger.info("scanner_stopped")
 

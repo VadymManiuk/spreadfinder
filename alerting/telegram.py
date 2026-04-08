@@ -186,10 +186,15 @@ class TelegramSender:
         # No inline keyboard on alerts — settings are in /filter panel only
         return await self._send_message(message)
 
-    async def send_grouped_alert(self, opps: list[SpreadOpportunity]) -> bool:
+    async def send_grouped_alert(
+        self,
+        opps: list[SpreadOpportunity],
+        deposit_status: dict | None = None,
+    ) -> bool:
         """
         Send a grouped alert with multiple routes for the same base token.
         Filters each route individually; sends only those that pass.
+        Includes funding info and deposit/withdrawal status.
         """
         if not self._is_configured():
             return False
@@ -202,7 +207,7 @@ class TelegramSender:
         # Sort by net spread descending (best first)
         passing.sort(key=lambda o: float(o.net_spread_bps), reverse=True)
 
-        message = format_grouped_alert(passing)
+        message = format_grouped_alert(passing, deposit_status=deposit_status)
         return await self._send_message(message)
 
     async def _send_message(

@@ -1,13 +1,15 @@
 """
 Telegram MarkdownV2 message formatter for spread alerts.
 
-Inputs: SpreadOpportunity object.
+Inputs: SpreadOpportunity object, optional deposit/withdrawal status.
 Outputs: Formatted MarkdownV2 string ready to send via Bot API.
 Assumptions:
   - All special characters must be escaped for MarkdownV2.
   - Messages should be compact but include all required fields.
+  - Funding settlement times: 8h for CEXes, 1h for Hyperliquid.
 """
 
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from models.snapshot import SpreadOpportunity
@@ -125,15 +127,53 @@ def format_alert(opp: SpreadOpportunity) -> str:
     return "\n".join(lines)
 
 
-def _format_route(opp: SpreadOpportunity, idx: int) -> str:
+def _next_funding_minutes(exchange: str) -> int:
     """
-    Format one route line for a grouped alert.
+    Minutes until next funding settlement for an exchange.
 
-    Layout:
-      #{idx}  BUY exchange → SELL exchange
-            Net: 2.15% | Gross: 2.28%
-            Buy @ 0.2067 | Sell @ 0.2115
-            Sizes: 100.00 / 50.00 | Conf: 0.86
+    Standard CEXes settle every 8h at 00:00, 08:00, 16:00 UTC.
+    Hyperliquid settles every 1h on the hour.
+    """
+    now = datetime.now(timezone.utc)
+
+    if exchange == "hyperliquid":
+        # Hourly funding — next settlement at the top of the next hour
+        next_hour = now.replace(minute=0, second=0, microsecond=0) + timedelta(hours=1)
+        return max(1, int((next_hour - now).total_seconds() / 60))
+
+    # Standard 8h cycle: 00:00, 08:00, 16:00 UTC
+    current_hour = now.hour
+    next_funding_hour = ((current_hour // 8) + 1) * 8
+    if next_funding_hour >= 24:
+        next_time = (now + timedelta(days=1)).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+    else:
+        next_time = now.replace(
+            hour=next_funding_hour, minute=0, second=0, microsecond=0
+        )
+    return max(1, int((next_time - now).total_seconds() / 60))
+
+
+def _fmt_minutes(minutes: int) -> str:
+    """Format minutes into 'Xh Ym' or 'Ym'."""
+    if minutes >= 60:
+        h = minutes // 60
+        m = minutes % 60
+        return f"{h}h {m}m" if m else f"{h}h"
+    return f"{minutes}m"
+
+
+def _format_route(
+    opp: SpreadOpportunity,
+    idx: int,
+    deposit_status: dict | None = None,
+) -> str:
+    """
+    Format one route for a grouped alert, including funding and deposit info.
+
+    deposit_status: optional dict from DepositChecker, keyed by (exchange, base).
+    Each value has .format_short() method.
     """
     buy_ex = escape_md2(opp.buy_exchange.upper())
     sell_ex = escape_md2(opp.sell_exchange.upper())
@@ -146,57 +186,85 @@ def _format_route(opp: SpreadOpportunity, idx: int) -> str:
     conf = escape_md2(f"{opp.confidence:.2f}")
     num = escape_md2(f"#{idx}")
 
+    # Funding rates
+    buy_fund = escape_md2(_fmt_funding(opp.buy_funding_rate))
+    sell_fund = escape_md2(_fmt_funding(opp.sell_funding_rate))
+
     lines = [
         f"  {num}  *{buy_ex}* → *{sell_ex}*",
         f"        Net: *{net_pct}* \\| Gross: {gross_pct}",
         f"        Buy @ `{buy_ask}` \\| Sell @ `{sell_bid}`",
         f"        Sizes: {ask_size} / {bid_size} \\| Conf: {conf}",
+        f"        Funding: {buy_fund} / {sell_fund}",
     ]
+
+    # Deposit/withdrawal status if available
+    if deposit_status is not None:
+        base = opp.canonical_symbol.split("-")[0] if "-" in opp.canonical_symbol else opp.canonical_symbol
+        buy_st = deposit_status.get((opp.buy_exchange, base))
+        sell_st = deposit_status.get((opp.sell_exchange, base))
+        if buy_st or sell_st:
+            buy_dw = escape_md2(buy_st.format_short() if buy_st else "⚪")
+            sell_dw = escape_md2(sell_st.format_short() if sell_st else "⚪")
+            lines.append(
+                f"        💰 {buy_ex} {buy_dw} \\| {sell_ex} {sell_dw}"
+            )
+
     return "\n".join(lines)
 
 
-def format_grouped_alert(opps: list[SpreadOpportunity]) -> str:
+def format_grouped_alert(
+    opps: list[SpreadOpportunity],
+    deposit_status: dict | None = None,
+) -> str:
     """
     Format multiple routes for the same base token into ONE message.
+    Includes funding info per route, time to next funding, and deposit/withdrawal status.
 
-    Opportunities should be pre-sorted by net_spread_bps descending (best first).
-
-    Layout:
-      🔔 SPREAD ALERT: POLYX
-      5 routes found
-
-      #1  BUY BINANCE → SELL GATE
-            Net: 2.45% | Gross: 2.57%
-            ...
-      #2  BUY ASTER → SELL GATE
-            ...
-      ⏱ 08:54:51 UTC
+    Args:
+        opps: Pre-sorted by net_spread_bps descending (best first).
+        deposit_status: {(exchange, base): CoinStatus} from DepositChecker.
     """
     if not opps:
         return ""
 
-    # Use the first opp (best spread) for the header symbol
     best = opps[0]
 
-    # Extract base token name from canonical_symbol (e.g. "POLYX-USDT-PERP" → "POLYX")
+    # Extract base token name
     base = best.canonical_symbol.split("-")[0] if "-" in best.canonical_symbol else best.canonical_symbol
     symbol = escape_md2(base)
 
     count = escape_md2(str(len(opps)))
     ts = escape_md2(best.timestamp.strftime("%H:%M:%S UTC"))
-
-    # Best net spread for the header
     best_net = escape_md2(_fmt_pct(best.net_spread_bps))
+
+    # Time to next funding — use the minimum across all exchanges in the routes
+    exchanges_in_routes = set()
+    for opp in opps:
+        exchanges_in_routes.add(opp.buy_exchange)
+        exchanges_in_routes.add(opp.sell_exchange)
+
+    min_funding_mins = min(
+        _next_funding_minutes(ex) for ex in exchanges_in_routes
+    )
+    funding_time = escape_md2(_fmt_minutes(min_funding_mins))
+
+    # Check if any route involves Hyperliquid (1h funding cycle)
+    has_hourly = "hyperliquid" in exchanges_in_routes
+    funding_label = f"⏰ Funding in: {funding_time}"
+    if has_hourly:
+        funding_label += escape_md2(" (HL: 1h cycle)")
 
     lines = [
         f"🔔 *SPREAD ALERT: {symbol}*",
         f"📊 {count} routes \\| Best: *{best_net}* net",
+        funding_label,
         "",
     ]
 
     for i, opp in enumerate(opps, 1):
-        lines.append(_format_route(opp, i))
-        lines.append("")  # blank line between routes
+        lines.append(_format_route(opp, i, deposit_status))
+        lines.append("")
 
     lines.append(f"⏱ {ts}")
 
