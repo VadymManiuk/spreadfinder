@@ -4,15 +4,20 @@ Deposit/withdrawal availability checker for exchange tokens.
 Inputs: Exchange name, base token ticker.
 Outputs: {"deposit": bool|None, "withdraw": bool|None} — None = unknown.
 Assumptions:
-  - Binance, Gate, Bitget, and Bybit have public (no API key) endpoints.
+  - Binance, Gate, Bitget have public (no API key) endpoints.
+  - Bybit: deposit status from public allowed-deposit-list; withdraw unknown.
+  - OKX: authenticated API (read-only key) for full deposit/withdraw status.
   - DEXes (Hyperliquid, Aster, Lighter) are always available (bridge-based).
-  - OKX has no public coin-status endpoint — returns None (unknown).
-  - Bybit: deposit status from allowed-deposit-list; withdraw unknown.
   - Refreshed every 5 minutes to catch chain suspensions.
 """
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import os
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 import aiohttp
 import structlog
@@ -74,6 +79,13 @@ class DepositChecker:
         self._status: dict[tuple[str, str], CoinStatus] = {}
         self._task: asyncio.Task | None = None
 
+        # Load .env so os.getenv picks up OKX credentials
+        try:
+            from dotenv import load_dotenv
+            load_dotenv()
+        except ImportError:
+            pass
+
     async def start(self) -> None:
         """Fetch initial data and start periodic refresh."""
         await self._refresh()
@@ -102,18 +114,23 @@ class DepositChecker:
                 logger.exception("deposit_checker_refresh_error")
 
     async def _refresh(self) -> None:
-        timeout = aiohttp.ClientTimeout(total=30)
+        timeout = aiohttp.ClientTimeout(total=60)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             results = await asyncio.gather(
                 self._fetch_binance(session),
                 self._fetch_gate(session),
                 self._fetch_bitget(session),
                 self._fetch_bybit(session),
+                self._fetch_okx(session),
                 return_exceptions=True,
             )
             for r in results:
                 if isinstance(r, Exception):
-                    logger.warning("deposit_fetch_error", error=str(r))
+                    logger.warning(
+                        "deposit_fetch_error",
+                        error=str(r),
+                        error_type=type(r).__name__,
+                    )
 
         logger.info("deposit_status_refreshed", total_coins=len(self._status))
 
@@ -245,3 +262,96 @@ class DepositChecker:
             count += 1
 
         logger.info("bybit_deposit_status_fetched", coins=count)
+
+    # ------------------------------------------------------------------
+    # OKX — authenticated API (read-only key)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _okx_sign(timestamp: str, method: str, path: str, secret: str) -> str:
+        """
+        OKX API signature: HMAC-SHA256 of (timestamp + method + path), base64 encoded.
+        """
+        message = timestamp + method + path
+        mac = hmac.new(
+            secret.encode("utf-8"),
+            message.encode("utf-8"),
+            hashlib.sha256,
+        )
+        return base64.b64encode(mac.digest()).decode("utf-8")
+
+    async def _fetch_okx(self, session: aiohttp.ClientSession) -> None:
+        """
+        OKX authenticated API: GET /api/v5/asset/currencies
+        Requires API key + HMAC-SHA256 signature + passphrase.
+        Returns deposit/withdraw status per currency per chain.
+        A coin is available if ANY chain supports the operation.
+        """
+        api_key = os.getenv("OKX_API_KEY", "")
+        api_secret = os.getenv("OKX_API_SECRET", "")
+        passphrase = os.getenv("OKX_PASSPHRASE", "")
+
+        if not api_key or not api_secret or not passphrase:
+            logger.debug("okx_deposit_skipped", reason="no API credentials")
+            return
+
+        # Build signature — timestamp MUST be generated right before the request
+        # to avoid clock drift rejection
+        method = "GET"
+        path = "/api/v5/asset/currencies"
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+        sign = self._okx_sign(timestamp, method, path, api_secret)
+
+        headers = {
+            "OK-ACCESS-KEY": api_key,
+            "OK-ACCESS-SIGN": sign,
+            "OK-ACCESS-TIMESTAMP": timestamp,
+            "OK-ACCESS-PASSPHRASE": passphrase,
+            "Content-Type": "application/json",
+            "User-Agent": "python-aiohttp/3.9",
+        }
+
+        url = f"https://www.okx.com{path}"
+        async with session.get(url, headers=headers) as resp:
+            resp.raise_for_status()
+            data = await resp.json()
+
+        if data.get("code") != "0":
+            logger.warning(
+                "okx_deposit_api_error",
+                code=data.get("code"),
+                msg=data.get("msg"),
+            )
+            return
+
+        # Group by currency — a coin is available if ANY chain supports it
+        # Each entry has: ccy, chain, canDep (bool), canWd (bool)
+        coin_deposit: dict[str, bool] = {}
+        coin_withdraw: dict[str, bool] = {}
+
+        for item in data.get("data", []):
+            ccy = item.get("ccy", "").upper()
+            if not ccy:
+                continue
+            can_dep = item.get("canDep", False)
+            can_wd = item.get("canWd", False)
+            # True if ANY chain allows it
+            if can_dep:
+                coin_deposit[ccy] = True
+            elif ccy not in coin_deposit:
+                coin_deposit[ccy] = False
+            if can_wd:
+                coin_withdraw[ccy] = True
+            elif ccy not in coin_withdraw:
+                coin_withdraw[ccy] = False
+
+        count = 0
+        all_coins = set(coin_deposit.keys()) | set(coin_withdraw.keys())
+        for ccy in all_coins:
+            self._status[("okx", ccy)] = CoinStatus(
+                deposit=coin_deposit.get(ccy),
+                withdraw=coin_withdraw.get(ccy),
+            )
+            count += 1
+
+        logger.info("okx_deposit_status_fetched", coins=count)
