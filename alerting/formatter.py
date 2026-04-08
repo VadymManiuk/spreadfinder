@@ -62,7 +62,7 @@ def _fmt_vol(volume: Decimal | None) -> str:
     if v >= 1_000_000:
         return f"${v / 1_000_000:.1f}M"
     if v >= 1_000:
-        return f"${v / 1_000:.0f}K"
+        return f"${v / 1_000:.1f}K"
     return f"${v:.0f}"
 
 
@@ -92,6 +92,10 @@ def _fmt_funding(rate: Decimal | None) -> str:
         return "—"
     pct = rate * 100
     return f"{pct:.4f}%"
+
+
+# Backward-compatible helper names kept for legacy tests/imports.
+_fmt_volume = _fmt_vol
 
 
 def _dw_symbols(deposit_status: dict | None, exchange: str, base: str) -> str:
