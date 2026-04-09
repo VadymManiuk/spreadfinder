@@ -48,7 +48,7 @@ class FilterChain:
     def __init__(
         self,
         min_gross_spread_bps: Decimal = Decimal("10.0"),
-        max_gross_spread_bps: Decimal = Decimal("500.0"),
+        max_gross_spread_bps: Decimal = Decimal("50000.0"),  # 500% — effectively disabled
         min_net_spread_bps: Decimal = Decimal("5.0"),
         min_bid_size: Decimal = Decimal("100.0"),
         min_ask_size: Decimal = Decimal("100.0"),

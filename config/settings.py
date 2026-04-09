@@ -39,7 +39,7 @@ class FilterSettings(BaseSettings):
 
     # Spread thresholds — default 1% net minimum (100 bps)
     min_gross_spread_bps: Decimal = Decimal("50.0")
-    max_gross_spread_bps: Decimal = Decimal("500.0")
+    max_gross_spread_bps: Decimal = Decimal("50000.0")  # 500% — effectively disabled; small-cap spreads can be huge
     min_net_spread_bps: Decimal = Decimal("100.0")
 
     # Liquidity minimums
