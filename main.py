@@ -81,6 +81,7 @@ from exchange_adapters.okx import OkxAdapter
 from exchange_adapters.bitget import BitgetAdapter
 from exchange_adapters.aster import AsterAdapter
 from exchange_adapters.lighter import LighterAdapter
+from exchange_adapters.mexc import MexcAdapter
 from symbol_mapper.exchange_symbols import LIGHTER_MARKET_INDEX_MAP
 from spread_engine.calculator import calculate_spread
 from filters.filter_chain import FilterChain
@@ -357,6 +358,13 @@ class SpreadScanner:
                     on_snapshot=self._on_snapshot,
                     canonical_map=canonical_map,
                     market_index_map=LIGHTER_MARKET_INDEX_MAP,
+                    stale_threshold_seconds=stale_threshold,
+                )
+            elif exchange == "mexc":
+                adapter = MexcAdapter(
+                    symbols=native_symbols,
+                    on_snapshot=self._on_snapshot,
+                    canonical_map=canonical_map,
                     stale_threshold_seconds=stale_threshold,
                 )
             else:

@@ -100,6 +100,10 @@ class ExchangeFees(BaseSettings):
     lighter_maker: Decimal = Decimal("0.0002")
     lighter_taker: Decimal = Decimal("0.0005")
 
+    # MEXC: 0.02% maker, 0.06% taker  # ESTIMATE
+    mexc_maker: Decimal = Decimal("0.0002")
+    mexc_taker: Decimal = Decimal("0.0006")
+
     # Slippage factor (fraction of mid price)
     # ESTIMATE — small caps will have higher slippage
     slippage_factor: Decimal = Decimal("0.0001")
@@ -143,7 +147,7 @@ class Settings(BaseSettings):
 
     # Exchanges to enable (subset of: binance, hyperliquid, gate)
     enabled_exchanges: list[str] = Field(
-        default_factory=lambda: ["binance", "hyperliquid", "gate"]
+        default_factory=lambda: ["binance", "hyperliquid", "gate", "mexc"]
     )
 
     # Market cap filter — targets small-cap tokens

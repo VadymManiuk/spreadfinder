@@ -354,6 +354,45 @@ def lighter_parse_and_store_indices(data: list) -> list[str]:
     return symbols
 
 
+# MEXC futures: same underscore format as Gate ("BTC_USDT")
+MEXC_QUOTE = "USDT"
+
+
+def mexc_native_to_canonical(native: str) -> str | None:
+    """Convert MEXC "BTC_USDT" to "BTC-USDT-PERP"."""
+    parts = native.split("_")
+    if len(parts) != 2:
+        return None
+    base, quote = parts
+    if not base or not quote:
+        return None
+    return f"{base}-{quote}-PERP"
+
+
+def mexc_canonical_to_native(canonical: str) -> str | None:
+    """Convert "BTC-USDT-PERP" to MEXC "BTC_USDT"."""
+    parts = canonical.split("-")
+    if len(parts) != 3 or parts[2] != "PERP":
+        return None
+    return f"{parts[0]}_{parts[1]}"
+
+
+def _parse_mexc_symbols(data: dict) -> list[str]:
+    """
+    Extract perpetual futures symbols from MEXC contract/detail response.
+
+    Response: {"success": true, "data": [{"symbol": "BTC_USDT", "state": 0, ...}, ...]}
+    state=0 means active.
+    """
+    symbols = []
+    for item in data.get("data", []):
+        if isinstance(item, dict) and item.get("state") == 0:
+            sym = item.get("symbol", "")
+            if sym:
+                symbols.append(sym)
+    return symbols
+
+
 # Registry of supported exchanges
 EXCHANGE_CONFIGS: dict[str, ExchangeConfig] = {
     "binance": ExchangeConfig(
@@ -411,5 +450,12 @@ EXCHANGE_CONFIGS: dict[str, ExchangeConfig] = {
         to_canonical=lighter_native_to_canonical,
         to_native=lighter_canonical_to_native,
         parse_symbols=lighter_parse_and_store_indices,
+    ),
+    "mexc": ExchangeConfig(
+        name="mexc",
+        rest_url="https://contract.mexc.com/api/v1/contract/detail",
+        to_canonical=mexc_native_to_canonical,
+        to_native=mexc_canonical_to_native,
+        parse_symbols=_parse_mexc_symbols,
     ),
 }
