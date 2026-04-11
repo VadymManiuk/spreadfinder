@@ -109,6 +109,36 @@ class ExchangeFees(BaseSettings):
     slippage_factor: Decimal = Decimal("0.0001")
 
 
+class PumpSettings(BaseSettings):
+    """
+    Price pump/dump alert configuration.
+
+    Detects when a token's mid price changes by more than `min_change_pct`
+    over the last `window_minutes`. Filtered by 24h volume and market cap.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="PUMP_", **_ENV_FILE_CONFIG)
+
+    # Master switch
+    enabled: bool = True
+
+    # Detection thresholds
+    min_change_pct: Decimal = Decimal("5.0")        # 5% move triggers alert
+    window_minutes: int = 60                          # measured over the last 60 minutes
+    check_interval_seconds: int = 30                  # how often the detection loop runs
+
+    # Liquidity / market filters
+    min_volume_24h: Decimal = Decimal("100000")       # at least $100K 24h volume
+    min_market_cap: int = 0                           # no floor by default
+    max_market_cap: int = 500_000_000                 # ignore tokens above $500M
+
+    # Spam prevention
+    cooldown_seconds: int = 1800                      # 30 min between alerts per token+direction
+
+    # History retention — keep at least window + buffer
+    history_retention_minutes: int = 180
+
+
 class AdapterSettings(BaseSettings):
     """Exchange adapter connection settings."""
 
@@ -141,6 +171,7 @@ class Settings(BaseSettings):
     filters: FilterSettings = Field(default_factory=FilterSettings)
     fees: ExchangeFees = Field(default_factory=ExchangeFees)
     adapter: AdapterSettings = Field(default_factory=AdapterSettings)
+    pump: PumpSettings = Field(default_factory=PumpSettings)
 
     # Logging
     log_level: str = "INFO"

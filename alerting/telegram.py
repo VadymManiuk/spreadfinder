@@ -19,7 +19,8 @@ import aiohttp
 import structlog
 
 from models.snapshot import SpreadOpportunity
-from alerting.formatter import format_alert, format_grouped_alert
+from pump_detector.models import PumpAlert
+from alerting.formatter import format_alert, format_grouped_alert, format_pump_alert
 
 logger = structlog.get_logger(__name__)
 
@@ -39,12 +40,33 @@ SPREAD_FILTER_OPTIONS = [
 # Persistent bottom keyboard buttons
 BOTTOM_MENU_KEYBOARD = {
     "keyboard": [
-        [{"text": "⚙️ Settings"}, {"text": "📊 Status"}],
-        [{"text": "❓ Help"}],
+        [{"text": "⚙️ Spread"}, {"text": "🚀 Pump"}],
+        [{"text": "📊 Status"}, {"text": "❓ Help"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
 }
+
+# Inline quick-select options for the pump panel.
+# Threshold in %, window in minutes, volume floor in USD.
+PUMP_PCT_OPTIONS = [
+    {"label": "> 3%", "value": 3.0},
+    {"label": "> 5%", "value": 5.0},
+    {"label": "> 10%", "value": 10.0},
+    {"label": "> 20%", "value": 20.0},
+]
+PUMP_TIME_OPTIONS = [
+    {"label": "5 min", "value": 5},
+    {"label": "15 min", "value": 15},
+    {"label": "1 h", "value": 60},
+    {"label": "4 h", "value": 240},
+]
+PUMP_VOL_OPTIONS = [
+    {"label": "$10K", "value": 10_000},
+    {"label": "$100K", "value": 100_000},
+    {"label": "$500K", "value": 500_000},
+    {"label": "$1M", "value": 1_000_000},
+]
 
 
 class TelegramSender:
@@ -215,6 +237,13 @@ class TelegramSender:
         )
         return await self._send_message(message)
 
+    async def send_pump_alert(self, alert: PumpAlert) -> bool:
+        """Send a pump/dump price alert. Bypasses spread % filter."""
+        if not self._is_configured():
+            return False
+        message = format_pump_alert(alert)
+        return await self._send_message(message)
+
     async def _send_message(
         self,
         text: str,
@@ -313,8 +342,14 @@ class TelegramSender:
         """Register bot commands so they appear in Telegram's bottom menu."""
         url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/setMyCommands"
         commands = [
-            {"command": "filter", "description": "Open filter settings panel"},
+            {"command": "filter", "description": "Open spread filter panel"},
             {"command": "setmin", "description": "Set minimum spread % (e.g. /setmin 2.5)"},
+            {"command": "pump", "description": "Open pump alert panel"},
+            {"command": "setpump", "description": "Set min pump %  (e.g. /setpump 5)"},
+            {"command": "setpumptime", "description": "Set pump window minutes (e.g. /setpumptime 60)"},
+            {"command": "setpumpvol", "description": "Set min 24h volume (e.g. /setpumpvol 100000)"},
+            {"command": "pumpon", "description": "Enable pump alerts"},
+            {"command": "pumpoff", "description": "Disable pump alerts"},
             {"command": "help", "description": "Show help and commands"},
         ]
         try:
@@ -445,14 +480,19 @@ class TelegramSender:
             except (ValueError, IndexError):
                 await self._answer_callback(callback_id, "Invalid filter")
 
+        elif data.startswith("pump_"):
+            await self._handle_pump_callback(data, callback, callback_id, chat_id)
+
     async def _handle_message(self, message: dict) -> None:
         """Handle text messages, commands, and bottom menu button presses."""
         text = (message.get("text") or "").strip()
         chat_id = str(message.get("chat", {}).get("id", ""))
 
         # Bottom menu button presses
-        if text == "⚙️ Settings":
+        if text in ("⚙️ Spread", "⚙️ Settings"):
             await self._send_filter_status(chat_id)
+        elif text == "🚀 Pump":
+            await self._send_pump_panel(chat_id)
         elif text == "📊 Status":
             await self._send_status(chat_id)
         elif text == "❓ Help":
@@ -462,6 +502,18 @@ class TelegramSender:
             await self._handle_setmin(text, chat_id)
         elif text.startswith("/filter") or text.startswith("/settings"):
             await self._send_filter_status(chat_id)
+        elif text.startswith("/setpumptime"):
+            await self._handle_setpumptime(text, chat_id)
+        elif text.startswith("/setpumpvol"):
+            await self._handle_setpumpvol(text, chat_id)
+        elif text.startswith("/setpump"):
+            await self._handle_setpump(text, chat_id)
+        elif text.startswith("/pumpon"):
+            await self._handle_pump_toggle(chat_id, True)
+        elif text.startswith("/pumpoff"):
+            await self._handle_pump_toggle(chat_id, False)
+        elif text.startswith("/pumpsettings") or text.startswith("/pump"):
+            await self._send_pump_panel(chat_id)
         elif text.startswith("/start") or text.startswith("/help"):
             await self._send_welcome(chat_id)
 
@@ -512,6 +564,270 @@ class TelegramSender:
                 f"❌ Invalid number: {parts[1]}\n"
                 "Usage: /setmin 2.5"
             )
+
+    # ------------------------------------------------------------------
+    # /pump commands
+    # ------------------------------------------------------------------
+
+    def _get_pump_detector(self):
+        """Return the attached PumpDetector, or None if not wired."""
+        return getattr(self, "pump_detector", None)
+
+    def _pump_is_enabled(self) -> bool:
+        """Best-effort read of the runtime pump-enabled flag from main.py."""
+        getter = getattr(self, "_pump_enabled_getter", None)
+        if callable(getter):
+            try:
+                return bool(getter())
+            except Exception:
+                return True
+        return True
+
+    # ------------------------------------------------------------------
+    # /pump interactive panel
+    # ------------------------------------------------------------------
+
+    def _build_pump_keyboard(self) -> list[list[dict]]:
+        """
+        Inline keyboard for the pump settings panel.
+        Rows: threshold, window, volume, enable toggle.
+        Active option is marked with ✅.
+        """
+        det = self._get_pump_detector()
+        if det is None:
+            return []
+
+        cur_pct = float(det.min_change_pct)
+        cur_time = det.window_seconds // 60
+        cur_vol = float(det.min_volume_24h)
+        enabled = self._pump_is_enabled()
+
+        def row(prefix: str, options: list[dict], current) -> list[dict]:
+            out: list[dict] = []
+            for opt in options:
+                is_active = abs(float(opt["value"]) - float(current)) < 1e-6
+                mark = "✅ " if is_active else ""
+                out.append({
+                    "text": f"{mark}{opt['label']}",
+                    "callback_data": f"{prefix}:{opt['value']}",
+                })
+            return out
+
+        return [
+            row("pump_pct", PUMP_PCT_OPTIONS, cur_pct),
+            row("pump_time", PUMP_TIME_OPTIONS, cur_time),
+            row("pump_vol", PUMP_VOL_OPTIONS, cur_vol),
+            [
+                {
+                    "text": ("🛑 Turn off" if enabled else "✅ Turn on"),
+                    "callback_data": f"pump_toggle:{'off' if enabled else 'on'}",
+                },
+                {"text": "🔄 Refresh", "callback_data": "pump_refresh:1"},
+            ],
+        ]
+
+    def _pump_panel_text(self) -> str:
+        det = self._get_pump_detector()
+        if det is None:
+            return "❌ Pump detector not attached"
+        enabled = self._pump_is_enabled()
+        status_line = "🟢 ENABLED" if enabled else "🛑 DISABLED"
+        min_change = float(det.min_change_pct)
+        window_min = det.window_seconds // 60
+        min_vol = float(det.min_volume_24h)
+        max_mcap = det.max_market_cap
+        cooldown_min = det.cooldown_seconds // 60
+        return (
+            "🚀 Pump Alert Settings\n\n"
+            f"Status:        {status_line}\n"
+            f"Min change:    {min_change:g}%\n"
+            f"Window:        {window_min} min\n"
+            f"Min vol 24h:   ${min_vol:,.0f}\n"
+            f"Max mcap:      ${max_mcap:,}\n"
+            f"Cooldown:      {cooldown_min} min\n\n"
+            "Tap a button below, or use:\n"
+            "  /setpump <pct>\n"
+            "  /setpumptime <min>\n"
+            "  /setpumpvol <usd>"
+        )
+
+    async def _send_pump_panel(self, chat_id: str | None = None) -> None:
+        """Send the interactive pump settings panel with inline buttons."""
+        cid = chat_id or self.chat_id
+        det = self._get_pump_detector()
+        if det is None:
+            await self._send_plain(cid, "❌ Pump detector not attached")
+            return
+
+        text = self._pump_panel_text()
+        keyboard = self._build_pump_keyboard()
+
+        url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/sendMessage"
+        payload = {
+            "chat_id": cid,
+            "text": text,
+            "reply_markup": {"inline_keyboard": keyboard},
+        }
+        try:
+            session = await self._get_session()
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.warning("pump_panel_failed", status=resp.status, body=body[:200])
+        except Exception:
+            logger.exception("pump_panel_error")
+
+    async def _handle_pump_callback(
+        self, data: str, callback: dict, callback_id: str, chat_id: str
+    ) -> None:
+        """Handle inline button presses from the pump settings panel."""
+        det = self._get_pump_detector()
+        if det is None:
+            await self._answer_callback(callback_id, "Pump detector not attached")
+            return
+
+        from decimal import Decimal as _D
+
+        try:
+            key, raw = data.split(":", 1)
+        except ValueError:
+            await self._answer_callback(callback_id, "Bad data")
+            return
+
+        toast = ""
+        try:
+            if key == "pump_pct":
+                value = _D(raw)
+                det.update(min_change_pct=value)
+                toast = f"Min change: {float(value):g}%"
+            elif key == "pump_time":
+                mins = int(raw)
+                det.update(window_minutes=mins)
+                toast = f"Window: {mins} min"
+            elif key == "pump_vol":
+                value = _D(raw)
+                det.update(min_volume_24h=value)
+                toast = f"Min vol: ${float(value):,.0f}"
+            elif key == "pump_toggle":
+                setter = getattr(self, "_pump_enabled_setter", None)
+                if not callable(setter):
+                    await self._answer_callback(callback_id, "Toggle not wired")
+                    return
+                enable = raw == "on"
+                setter(enable)
+                toast = "Pump alerts ON" if enable else "Pump alerts OFF"
+            elif key == "pump_refresh":
+                toast = "Refreshed"
+            else:
+                await self._answer_callback(callback_id, "Unknown action")
+                return
+        except Exception:
+            logger.exception("pump_callback_error")
+            await self._answer_callback(callback_id, "Failed")
+            return
+
+        await self._answer_callback(callback_id, toast)
+
+        # Re-render the panel text + keyboard in place
+        msg = callback.get("message", {})
+        msg_id = msg.get("message_id")
+        msg_chat_id = str(msg.get("chat", {}).get("id", chat_id))
+        if msg_id:
+            await self._edit_pump_panel(msg_chat_id, msg_id)
+
+    async def _edit_pump_panel(self, chat_id: str, message_id: int) -> None:
+        """Edit an existing pump panel message in place with fresh state."""
+        url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/editMessageText"
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": self._pump_panel_text(),
+            "reply_markup": {"inline_keyboard": self._build_pump_keyboard()},
+        }
+        try:
+            session = await self._get_session()
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.debug("pump_panel_edit_failed", status=resp.status, body=body[:200])
+        except Exception:
+            logger.exception("pump_panel_edit_error")
+
+    async def _handle_setpump(self, text: str, chat_id: str) -> None:
+        det = self._get_pump_detector()
+        if det is None:
+            await self._send_plain(chat_id, "❌ Pump detector not attached")
+            return
+        parts = text.split()
+        if len(parts) < 2:
+            await self._send_plain(chat_id, "Usage: /setpump 5  → 5% threshold")
+            return
+        try:
+            from decimal import Decimal as _D
+            value = _D(parts[1])
+            if value <= 0 or value > 1000:
+                await self._send_plain(chat_id, "❌ Must be between 0 and 1000")
+                return
+            det.update(min_change_pct=value)
+            await self._send_plain(chat_id, f"✅ Pump min change set to {float(value):g}%")
+        except Exception:
+            await self._send_plain(chat_id, f"❌ Invalid number: {parts[1]}")
+
+    async def _handle_setpumptime(self, text: str, chat_id: str) -> None:
+        det = self._get_pump_detector()
+        if det is None:
+            await self._send_plain(chat_id, "❌ Pump detector not attached")
+            return
+        parts = text.split()
+        if len(parts) < 2:
+            await self._send_plain(chat_id, "Usage: /setpumptime 60  → 60 minute window")
+            return
+        try:
+            mins = int(parts[1])
+            if mins < 1 or mins > 1440:
+                await self._send_plain(chat_id, "❌ Must be between 1 and 1440 minutes")
+                return
+            det.update(window_minutes=mins)
+            await self._send_plain(chat_id, f"✅ Pump window set to {mins} min")
+        except ValueError:
+            await self._send_plain(chat_id, f"❌ Invalid number: {parts[1]}")
+
+    async def _handle_setpumpvol(self, text: str, chat_id: str) -> None:
+        det = self._get_pump_detector()
+        if det is None:
+            await self._send_plain(chat_id, "❌ Pump detector not attached")
+            return
+        parts = text.split()
+        if len(parts) < 2:
+            await self._send_plain(chat_id, "Usage: /setpumpvol 100000  → $100K min 24h vol")
+            return
+        try:
+            from decimal import Decimal as _D
+            value = _D(parts[1])
+            if value < 0:
+                await self._send_plain(chat_id, "❌ Must be >= 0")
+                return
+            det.update(min_volume_24h=value)
+            await self._send_plain(chat_id, f"✅ Pump min volume set to ${float(value):,.0f}")
+        except Exception:
+            await self._send_plain(chat_id, f"❌ Invalid number: {parts[1]}")
+
+    async def _handle_pump_toggle(self, chat_id: str, enable: bool) -> None:
+        # Toggle is owned by the scanner — set a flag the scanner reads.
+        # We piggy-back on a `pump_enabled` attr if the scanner exposes one.
+        scanner_flag = getattr(self, "_pump_enabled_setter", None)
+        if scanner_flag is None:
+            await self._send_plain(
+                chat_id,
+                "⚠️ Pump toggle isn't wired in this build. "
+                "Restart with PUMP_ENABLED in .env to control it."
+            )
+            return
+        scanner_flag(enable)
+        await self._send_plain(
+            chat_id,
+            "✅ Pump alerts ENABLED" if enable else "🛑 Pump alerts DISABLED"
+        )
 
     async def _send_welcome(self, chat_id: str | None = None) -> None:
         """Send welcome message with command list."""

@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 from models.snapshot import MarketSnapshot, SpreadOpportunity
+from pump_detector.models import PumpAlert
 
 # Characters that must be escaped in MarkdownV2
 # https://core.telegram.org/bots/api#markdownv2-style
@@ -368,6 +369,110 @@ def format_grouped_alert(
 
     # ── TIMESTAMP ───────────────────────────────────────────────────────
     ts = _e(best.timestamp.strftime("%H:%M:%S UTC"))
+    lines.append(f"⏱ {ts}")
+
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Pump / dump alert format
+# ---------------------------------------------------------------------------
+
+def _fmt_mcap(mcap: float | None) -> str:
+    """Format a market cap value as $X.XM/$X.XB or '?'."""
+    if mcap is None:
+        return "?"
+    if mcap >= 1_000_000_000:
+        return f"${mcap / 1_000_000_000:.2f}B"
+    if mcap >= 1_000_000:
+        return f"${mcap / 1_000_000:.1f}M"
+    if mcap >= 1_000:
+        return f"${mcap / 1_000:.0f}K"
+    return f"${mcap:.0f}"
+
+
+def _fmt_window(seconds: int) -> str:
+    """Format a window length in seconds as 'Xh Ym' or 'Ym' or 'Xs'."""
+    if seconds >= 3600:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        return f"{h}h{m}m" if m else f"{h}h"
+    if seconds >= 60:
+        return f"{seconds // 60}m"
+    return f"{seconds}s"
+
+
+def format_pump_alert(alert: PumpAlert) -> str:
+    """
+    Format a PumpAlert into a Telegram MarkdownV2 message.
+
+    Layout:
+      🚀 PUMP  ARIA  +12.34%  in 1h
+      💰 MCap: $45M  |  Vol24h: $2.3M
+      📈 0.0500 → 0.0561  (trigger: bitget)
+
+      ```
+      Ex        Price     Vol
+      bitget    0.0561    $2.3M
+      aster     0.0558    $1.1M
+      gate      0.0560    $0.5M
+      ```
+
+      ⏱ 12:34:56 UTC
+    """
+    base = _e(alert.base)
+    arrow_emoji = "🚀" if alert.direction == "pump" else "📉"
+    label = "PUMP" if alert.direction == "pump" else "DUMP"
+    change_pct = float(alert.change_pct)
+    change_str = _e(f"{change_pct:+.2f}%")
+    window_str = _e(_fmt_window(alert.window_seconds))
+
+    prec = _auto_precision(alert.current_price)
+    start_str = _e(f"{float(alert.start_price):.{prec}f}")
+    current_str = _e(f"{float(alert.current_price):.{prec}f}")
+
+    mcap_str = _e(_fmt_mcap(alert.market_cap))
+    vol_str = _e(_fmt_vol(alert.max_volume_24h))
+    trigger_ex = _e(alert.triggered_on)
+
+    lines = [
+        f"{arrow_emoji} *{label}  {base}  {change_str}  in {window_str}*",
+        f"💰 MCap: {mcap_str}  \\|  Vol24h: {vol_str}",
+        f"📈 `{start_str}` → `{current_str}`  \\(trigger: {trigger_ex}\\)",
+        "",
+    ]
+
+    # Per-exchange table sorted by price descending so the highest price
+    # (most likely the pump leader) shows up first.
+    if alert.exchange_prices:
+        exchanges = sorted(
+            alert.exchange_prices.keys(),
+            key=lambda e: float(alert.exchange_prices[e]),
+            reverse=(alert.direction == "pump"),
+        )
+        rows: list[tuple[str, str, str]] = []
+        for ex in exchanges:
+            price = alert.exchange_prices[ex]
+            vol = alert.exchange_volumes.get(ex)
+            rows.append((ex, f"{float(price):.{prec}f}", _fmt_vol(vol)))
+
+        col_ex = max(max(len(r[0]) for r in rows), 2)
+        col_price = max(max(len(r[1]) for r in rows), 5)
+        col_vol = max(max(len(r[2]) for r in rows), 3)
+
+        hdr = (
+            f"{'Ex':<{col_ex}}  {'Price':>{col_price}}  {'Vol':>{col_vol}}"
+        )
+        tbl_lines = [hdr]
+        for ex, price, vol in rows:
+            tbl_lines.append(
+                f"{ex:<{col_ex}}  {price:>{col_price}}  {vol:>{col_vol}}"
+            )
+        table_str = "\n".join(tbl_lines)
+        lines.append(f"```\n{table_str}\n```")
+        lines.append("")
+
+    ts = _e(alert.timestamp.strftime("%H:%M:%S UTC"))
     lines.append(f"⏱ {ts}")
 
     return "\n".join(lines)

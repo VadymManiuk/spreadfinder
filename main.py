@@ -85,8 +85,10 @@ from exchange_adapters.mexc import MexcAdapter
 from symbol_mapper.exchange_symbols import LIGHTER_MARKET_INDEX_MAP
 from spread_engine.calculator import calculate_spread
 from filters.filter_chain import FilterChain
+from filters.market_cap_filter import MarketCapFilter
 from alerting.telegram import TelegramSender
 from models.snapshot import MarketSnapshot
+from pump_detector import PriceHistory, PumpDetector
 
 logger = structlog.get_logger(__name__)
 
@@ -158,6 +160,42 @@ class SpreadScanner:
         )
         self._adapters: list = []
 
+        # Pump/dump detector
+        self._mcap_filter = MarketCapFilter(
+            max_mcap=settings.pump.max_market_cap,
+            min_mcap=settings.pump.min_market_cap,
+            refresh_interval=settings.mcap_refresh_interval,
+        )
+        self._price_history = PriceHistory(
+            retention_minutes=settings.pump.history_retention_minutes,
+        )
+        self._pump_detector = PumpDetector(
+            history=self._price_history,
+            min_change_pct=settings.pump.min_change_pct,
+            window_minutes=settings.pump.window_minutes,
+            min_volume_24h=settings.pump.min_volume_24h,
+            cooldown_seconds=settings.pump.cooldown_seconds,
+            mcap_filter=self._mcap_filter,
+            min_market_cap=settings.pump.min_market_cap,
+            max_market_cap=settings.pump.max_market_cap,
+        )
+        self._pump_check_interval = settings.pump.check_interval_seconds
+        self._pump_enabled = settings.pump.enabled
+        self._pump_task: asyncio.Task | None = None
+        # Expose detector + telegram sender so /pump commands can mutate
+        self._telegram.pump_detector = self._pump_detector  # type: ignore[attr-defined]
+        self._telegram._pump_enabled_setter = self._set_pump_enabled  # type: ignore[attr-defined]
+        self._telegram._pump_enabled_getter = lambda: self._pump_enabled  # type: ignore[attr-defined]
+
+    def _set_pump_enabled(self, enabled: bool) -> None:
+        """Toggle pump alerts at runtime (called from /pumpon, /pumpoff)."""
+        was = self._pump_enabled
+        self._pump_enabled = enabled
+        if enabled and not was and self._running:
+            if self._pump_task is None or self._pump_task.done():
+                self._pump_task = asyncio.create_task(self._pump_check_loop())
+        logger.info("pump_toggled", enabled=enabled)
+
     def _extract_base(self, canonical: str) -> str:
         """Extract base token from canonical symbol. 'POLYX-USDT-PERP' → 'POLYX'."""
         return canonical.split("-")[0] if "-" in canonical else canonical
@@ -172,6 +210,11 @@ class SpreadScanner:
         """
         key = (snapshot.exchange, snapshot.canonical_symbol)
         self._snapshots[key] = snapshot
+
+        # Record into pump-detector price history
+        base_for_history = self._extract_base(snapshot.canonical_symbol)
+        if base_for_history:
+            self._price_history.record(base_for_history, snapshot)
 
         # Throttle: skip spread calculation if we just did it for this key
         now = _time.monotonic()
@@ -280,6 +323,35 @@ class SpreadScanner:
             deposit_status=deposit_status,
             all_snapshots=all_snapshots,
         )
+
+    async def _pump_check_loop(self) -> None:
+        """Periodically scan price history and dispatch pump/dump alerts."""
+        logger.info(
+            "pump_loop_started",
+            interval_s=self._pump_check_interval,
+            min_change_pct=float(self._pump_detector.min_change_pct),
+            window_s=self._pump_detector.window_seconds,
+        )
+        while self._running:
+            try:
+                await asyncio.sleep(self._pump_check_interval)
+                if not self._pump_enabled:
+                    continue
+                alerts = self._pump_detector.scan()
+                for alert in alerts:
+                    logger.info(
+                        "pump_alert",
+                        base=alert.base,
+                        direction=alert.direction,
+                        change_pct=round(float(alert.change_pct), 2),
+                        window_s=alert.window_seconds,
+                        triggered_on=alert.triggered_on,
+                    )
+                    await self._telegram.send_pump_alert(alert)
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception("pump_loop_error")
 
     def _build_adapters(self) -> None:
         """Create exchange adapters based on symbol mapper results."""
@@ -412,6 +484,16 @@ class SpreadScanner:
         # Step 3: Start deposit/withdrawal checker
         await self._deposit_checker.start()
 
+        # Step 3b: Start market cap filter (used by pump detector)
+        try:
+            await self._mcap_filter.start()
+        except Exception:
+            logger.exception("mcap_filter_start_error")
+
+        # Step 3c: Start pump detector loop
+        if self._pump_enabled:
+            self._pump_task = asyncio.create_task(self._pump_check_loop())
+
         # Step 4: Start Telegram polling (for inline button callbacks)
         await self._telegram.start_polling()
 
@@ -429,8 +511,21 @@ class SpreadScanner:
         logger.info("scanner_stopping")
         self._running = False
 
+        if self._pump_task:
+            self._pump_task.cancel()
+            try:
+                await self._pump_task
+            except asyncio.CancelledError:
+                pass
+            self._pump_task = None
+
         for adapter in self._adapters:
             await adapter.stop()
+
+        try:
+            await self._mcap_filter.stop()
+        except Exception:
+            logger.exception("mcap_filter_stop_error")
 
         await self._deposit_checker.stop()
         await self._telegram.close()
