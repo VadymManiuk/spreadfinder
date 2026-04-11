@@ -15,6 +15,7 @@ from decimal import Decimal
 
 from models.snapshot import MarketSnapshot, SpreadOpportunity
 from pump_detector.models import PumpAlert
+from utils.exchange_links import futures_url
 
 # Characters that must be escaped in MarkdownV2
 # https://core.telegram.org/bots/api#markdownv2-style
@@ -353,6 +354,12 @@ def format_grouped_alert(
         lines.append(f"📊 *All exchanges:*")
         lines.append(f"```\n{table_str}\n```")
         lines.append("DW: " + " \\| ".join(dw_parts))
+
+        # Clickable futures links — one per exchange in the table.
+        # Order matches the table so users can scan top-to-bottom.
+        links_line = _build_links_line(base, [r["ex"] for r in exchange_rows])
+        if links_line:
+            lines.append(f"🔗 {links_line}")
         lines.append("")
 
     # ── ROUTES LIST (only if >1 route) ──────────────────────────────────
@@ -377,6 +384,37 @@ def format_grouped_alert(
 # ---------------------------------------------------------------------------
 # Pump / dump alert format
 # ---------------------------------------------------------------------------
+
+def _build_links_line(base: str, exchanges: list[str]) -> str | None:
+    """
+    Build a MarkdownV2 line with clickable futures links for each exchange.
+
+    Format: `ex1 | ex2 | ex3` where each name is a markdown link to the
+    exchange's perpetual-futures page for the given base token.
+    Exchanges without a known URL template are rendered as plain text.
+    Returns None if no links could be built (avoids an empty "Links:" row).
+    """
+    parts: list[str] = []
+    has_link = False
+    seen: set[str] = set()
+    for ex in exchanges:
+        if ex in seen:
+            continue
+        seen.add(ex)
+        url = futures_url(ex, base)
+        name_escaped = _e(ex)
+        if url:
+            # MarkdownV2 link: [text](url). The URL must also have its
+            # special chars escaped per Telegram docs (only `)` and `\`).
+            safe_url = url.replace("\\", "\\\\").replace(")", "\\)")
+            parts.append(f"[{name_escaped}]({safe_url})")
+            has_link = True
+        else:
+            parts.append(name_escaped)
+    if not parts or not has_link:
+        return None
+    return " \\| ".join(parts)
+
 
 def _fmt_mcap(mcap: float | None) -> str:
     """Format a market cap value as $X.XM/$X.XB or '?'."""
@@ -470,6 +508,12 @@ def format_pump_alert(alert: PumpAlert) -> str:
             )
         table_str = "\n".join(tbl_lines)
         lines.append(f"```\n{table_str}\n```")
+
+        # Clickable futures links per exchange (Telegram markdown links
+        # only work OUTSIDE code blocks, which is why this is a separate row)
+        links_line = _build_links_line(alert.base, exchanges)
+        if links_line:
+            lines.append(f"🔗 {links_line}")
         lines.append("")
 
     ts = _e(alert.timestamp.strftime("%H:%M:%S UTC"))
