@@ -15,7 +15,7 @@ from decimal import Decimal
 
 from models.snapshot import MarketSnapshot, SpreadOpportunity
 from pump_detector.models import PumpAlert
-from utils.exchange_links import futures_url
+from utils.exchange_links import futures_url, supported_exchanges
 
 # Characters that must be escaped in MarkdownV2
 # https://core.telegram.org/bots/api#markdownv2-style
@@ -385,22 +385,42 @@ def format_grouped_alert(
 # Pump / dump alert format
 # ---------------------------------------------------------------------------
 
-def _build_links_line(base: str, exchanges: list[str]) -> str | None:
+def _build_links_line(base: str, priority: list[str] | None = None) -> str | None:
     """
-    Build a MarkdownV2 line with clickable futures links for each exchange.
+    Build a MarkdownV2 line with clickable futures links for ALL supported
+    exchanges, so the user can jump to any venue to verify/trade — even if
+    the bot doesn't have a live snapshot from that exchange yet.
 
-    Format: `ex1 | ex2 | ex3` where each name is a markdown link to the
-    exchange's perpetual-futures page for the given base token.
-    Exchanges without a known URL template are rendered as plain text.
-    Returns None if no links could be built (avoids an empty "Links:" row).
+    `priority` is an optional ordering hint: exchanges in this list are
+    rendered first (in the given order), then all remaining supported
+    exchanges follow alphabetically. Priority typically comes from the
+    alert's per-exchange table so the most relevant links stay on top.
+
+    Returns None only if no link could be built at all (should never happen).
     """
-    parts: list[str] = []
-    has_link = False
+    priority = priority or []
+
+    ordered: list[str] = []
     seen: set[str] = set()
-    for ex in exchanges:
+
+    # 1. Exchanges explicitly in priority order
+    for ex in priority:
+        key = ex.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(key)
+
+    # 2. Every remaining supported exchange, alphabetically
+    for ex in supported_exchanges():
         if ex in seen:
             continue
         seen.add(ex)
+        ordered.append(ex)
+
+    parts: list[str] = []
+    has_link = False
+    for ex in ordered:
         url = futures_url(ex, base)
         name_escaped = _e(ex)
         if url:
@@ -411,6 +431,7 @@ def _build_links_line(base: str, exchanges: list[str]) -> str | None:
             has_link = True
         else:
             parts.append(name_escaped)
+
     if not parts or not has_link:
         return None
     return " \\| ".join(parts)
