@@ -284,45 +284,48 @@ class SpreadScanner:
         if not routes:
             return
 
-        # Sort by net spread descending (best route first)
-        routes.sort(key=lambda o: float(o.net_spread_bps), reverse=True)
+        try:
+            # Sort by net spread descending (best route first)
+            routes.sort(key=lambda o: float(o.net_spread_bps), reverse=True)
 
-        # Gather ALL exchange snapshots for this base token
-        # Used by the formatter to build the "All exchanges" table
-        all_snapshots: dict[str, MarketSnapshot] = {}
-        for (ex, canonical), snap in self._snapshots.items():
-            snap_base = self._extract_base(canonical)
-            if snap_base == base:
-                # If multiple canonicals per exchange (USDT vs USDC),
-                # keep the most recent one
-                existing = all_snapshots.get(ex)
-                if existing is None or snap.local_ts > existing.local_ts:
-                    all_snapshots[ex] = snap
+            # Gather ALL exchange snapshots for this base token
+            # Used by the formatter to build the "All exchanges" table
+            all_snapshots: dict[str, MarketSnapshot] = {}
+            for (ex, canonical), snap in list(self._snapshots.items()):
+                snap_base = self._extract_base(canonical)
+                if snap_base == base:
+                    # If multiple canonicals per exchange (USDT vs USDC),
+                    # keep the most recent one
+                    existing = all_snapshots.get(ex)
+                    if existing is None or snap.local_ts > existing.local_ts:
+                        all_snapshots[ex] = snap
 
-        # Build deposit status dict for all exchanges with snapshots
-        deposit_status = {}
-        all_exchanges = set(all_snapshots.keys())
-        for opp in routes:
-            all_exchanges.add(opp.buy_exchange)
-            all_exchanges.add(opp.sell_exchange)
-        for ex in all_exchanges:
-            key = (ex, base)
-            if key not in deposit_status:
-                deposit_status[key] = self._deposit_checker.get_status(ex, base)
+            # Build deposit status dict for all exchanges with snapshots
+            deposit_status = {}
+            all_exchanges = set(all_snapshots.keys())
+            for opp in routes:
+                all_exchanges.add(opp.buy_exchange)
+                all_exchanges.add(opp.sell_exchange)
+            for ex in all_exchanges:
+                key = (ex, base)
+                if key not in deposit_status:
+                    deposit_status[key] = self._deposit_checker.get_status(ex, base)
 
-        logger.info(
-            "flushing_grouped_alert",
-            base=base,
-            route_count=len(routes),
-            exchanges_with_snapshots=len(all_snapshots),
-            best_net_pct=round(float(routes[0].net_spread_bps) / 100, 2),
-        )
+            logger.info(
+                "flushing_grouped_alert",
+                base=base,
+                route_count=len(routes),
+                exchanges_with_snapshots=len(all_snapshots),
+                best_net_pct=round(float(routes[0].net_spread_bps) / 100, 2),
+            )
 
-        await self._telegram.send_grouped_alert(
-            routes,
-            deposit_status=deposit_status,
-            all_snapshots=all_snapshots,
-        )
+            await self._telegram.send_grouped_alert(
+                routes,
+                deposit_status=deposit_status,
+                all_snapshots=all_snapshots,
+            )
+        except Exception:
+            logger.exception("flush_alert_error", base=base, route_count=len(routes))
 
     async def _pump_check_loop(self) -> None:
         """Periodically scan price history and dispatch pump/dump alerts."""
