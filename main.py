@@ -120,6 +120,22 @@ class SpreadScanner:
         self._last_calc_time: dict[tuple[str, str], float] = {}
         self._min_calc_interval: float = 1.0  # seconds
 
+        # ── Diagnostic counters (exposed via /status) ──────────────────
+        self._start_time: float = _time.monotonic()
+        self._diag = {
+            "snapshots_total": 0,          # total snapshots received
+            "spreads_calculated": 0,       # spread calculations run
+            "spreads_passed_filters": 0,   # passed filter chain
+            "spreads_sent": 0,             # sent via telegram
+            "spreads_rejected_hard": 0,    # rejected by <1% hard check
+            "spreads_rejected_filter": 0,  # rejected by filter chain
+            "last_spread_alert_ts": None,  # datetime of last spread alert
+            "last_spread_symbol": "",      # symbol of last spread alert
+            "pumps_sent": 0,               # pump alerts sent
+            "last_pump_ts": None,          # datetime of last pump alert
+            "flush_errors": 0,             # errors in _flush_after_delay
+        }
+
         # Cross-quote matchable pairs built after bootstrap.
         # Maps (exchange, canonical) -> list of (other_exchange, other_canonical)
         # to know which snapshots to compare for spreads.
@@ -186,6 +202,8 @@ class SpreadScanner:
         self._telegram.pump_detector = self._pump_detector  # type: ignore[attr-defined]
         self._telegram._pump_enabled_setter = self._set_pump_enabled  # type: ignore[attr-defined]
         self._telegram._pump_enabled_getter = lambda: self._pump_enabled  # type: ignore[attr-defined]
+        self._telegram._scanner_diag = self._diag  # type: ignore[attr-defined]
+        self._telegram._scanner_ref = self  # type: ignore[attr-defined]
 
     def _set_pump_enabled(self, enabled: bool) -> None:
         """Toggle pump alerts at runtime (called from /pumpon, /pumpoff)."""
@@ -210,6 +228,7 @@ class SpreadScanner:
         """
         key = (snapshot.exchange, snapshot.canonical_symbol)
         self._snapshots[key] = snapshot
+        self._diag["snapshots_total"] += 1
 
         # Record into pump-detector price history
         base_for_history = self._extract_base(snapshot.canonical_symbol)
@@ -235,17 +254,22 @@ class SpreadScanner:
             # Note: snapshots may have different canonical_symbols (USDT vs USDC)
             # so we use a cross-quote aware calculation
             opportunities = calculate_spread(snapshot, other_snap)
+            self._diag["spreads_calculated"] += len(opportunities)
 
             for opp in opportunities:
                 # HARD SAFETY CHECK — never send alerts below 1% net spread
                 # regardless of any other filter settings
                 net_pct = float(opp.net_spread_bps) / 100.0
                 if net_pct < 1.0:
+                    self._diag["spreads_rejected_hard"] += 1
                     continue
 
                 passed, results = self._filter_chain.evaluate(opp)
                 if not passed:
+                    self._diag["spreads_rejected_filter"] += 1
                     continue
+
+                self._diag["spreads_passed_filters"] += 1
 
                 # Record cooldown immediately so duplicate routes don't pass
                 self._filter_chain.record_alert(opp)
@@ -319,12 +343,17 @@ class SpreadScanner:
                 best_net_pct=round(float(routes[0].net_spread_bps) / 100, 2),
             )
 
-            await self._telegram.send_grouped_alert(
+            sent = await self._telegram.send_grouped_alert(
                 routes,
                 deposit_status=deposit_status,
                 all_snapshots=all_snapshots,
             )
+            if sent:
+                self._diag["spreads_sent"] += 1
+                self._diag["last_spread_alert_ts"] = datetime.now(timezone.utc)
+                self._diag["last_spread_symbol"] = base
         except Exception:
+            self._diag["flush_errors"] += 1
             logger.exception("flush_alert_error", base=base, route_count=len(routes))
 
     async def _pump_check_loop(self) -> None:
@@ -350,7 +379,10 @@ class SpreadScanner:
                         window_s=alert.window_seconds,
                         triggered_on=alert.triggered_on,
                     )
-                    await self._telegram.send_pump_alert(alert)
+                    sent = await self._telegram.send_pump_alert(alert)
+                    if sent:
+                        self._diag["pumps_sent"] += 1
+                        self._diag["last_pump_ts"] = datetime.now(timezone.utc)
             except asyncio.CancelledError:
                 break
             except Exception:
@@ -488,8 +520,11 @@ class SpreadScanner:
         await self._deposit_checker.start()
 
         # Step 3b: Start market cap filter (used by pump detector)
+        # Timeout: don't let CoinGecko block adapter startup
         try:
-            await self._mcap_filter.start()
+            await asyncio.wait_for(self._mcap_filter.start(), timeout=30)
+        except asyncio.TimeoutError:
+            logger.warning("mcap_filter_start_timeout", hint="CoinGecko unreachable, continuing without mcap data")
         except Exception:
             logger.exception("mcap_filter_start_error")
 

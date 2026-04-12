@@ -304,17 +304,61 @@ class TelegramSender:
         )
 
     async def _send_status(self, chat_id: str | None = None) -> None:
-        """Send current bot status: uptime, filter, snapshot counts."""
+        """Send comprehensive bot status with diagnostics."""
         cid = chat_id or self.chat_id
         current = self.get_min_spread_pct(cid)
-        snap_count = len(self._alert_count) if hasattr(self, '_alert_count') else 0
+
+        diag = getattr(self, "_scanner_diag", None)
+        scanner = getattr(self, "_scanner_ref", None)
+
+        if diag is None or scanner is None:
+            await self._send_plain(cid, "📊 Bot Status\nNo diagnostics attached")
+            return
+
+        import time as _t
+
+        uptime_s = int(_t.monotonic() - scanner._start_time)
+        uptime_h = uptime_s // 3600
+        uptime_m = (uptime_s % 3600) // 60
+
+        # Count active exchanges (those with at least 1 snapshot)
+        active_exchanges: dict[str, int] = {}
+        for (ex, _sym), _snap in scanner._snapshots.items():
+            active_exchanges[ex] = active_exchanges.get(ex, 0) + 1
+
+        exchanges_str = "\n".join(
+            f"  {ex}: {cnt} symbols" for ex, cnt in sorted(active_exchanges.items())
+        ) or "  (none connected)"
+
+        last_spread = diag.get("last_spread_alert_ts")
+        last_spread_str = last_spread.strftime("%H:%M:%S UTC") if last_spread else "never"
+        last_spread_sym = diag.get("last_spread_symbol", "")
+
+        last_pump = diag.get("last_pump_ts")
+        last_pump_str = last_pump.strftime("%H:%M:%S UTC") if last_pump else "never"
+
+        matchable_count = sum(len(v) for v in scanner._match_lookup.values()) // 2
 
         await self._send_plain(
             cid,
             f"📊 Bot Status\n\n"
-            f"Filter: > {current:g}% net spread\n"
-            f"Exchanges: Binance, Hyperliquid, Gate.io\n"
-            f"Status: Running"
+            f"⏱ Uptime: {uptime_h}h {uptime_m}m\n"
+            f"🔗 Exchanges:\n{exchanges_str}\n\n"
+            f"📸 Snapshots: {diag['snapshots_total']:,}\n"
+            f"🔀 Matchable pairs: {matchable_count:,}\n\n"
+            f"── Spread Alerts ──\n"
+            f"Calculations:   {diag['spreads_calculated']:,}\n"
+            f"Passed filters: {diag['spreads_passed_filters']:,}\n"
+            f"Sent:           {diag['spreads_sent']:,}\n"
+            f"Rejected <1%:   {diag['spreads_rejected_hard']:,}\n"
+            f"Rejected filter:{diag['spreads_rejected_filter']:,}\n"
+            f"Flush errors:   {diag['flush_errors']:,}\n"
+            f"Last alert:     {last_spread_str} {last_spread_sym}\n"
+            f"TG filter:      > {current:g}%\n\n"
+            f"── Pump Alerts ──\n"
+            f"Sent:           {diag['pumps_sent']:,}\n"
+            f"Last alert:     {last_pump_str}\n"
+            f"Enabled:        {'yes' if scanner._pump_enabled else 'no'}\n"
         )
 
     # ------------------------------------------------------------------
