@@ -388,6 +388,35 @@ class SpreadScanner:
             except Exception:
                 logger.exception("pump_loop_error")
 
+    async def _supervise_adapter(self, adapter) -> None:
+        """
+        Wrapper that runs adapter.start() in a loop.
+        If the adapter crashes for any reason, logs the error, waits,
+        and restarts it. One flaky exchange can never kill the whole bot.
+        """
+        restart_delay = 5  # seconds between restarts
+        while self._running:
+            try:
+                await adapter.start()
+                # start() returned normally (shouldn't happen unless stopped)
+                if not self._running:
+                    break
+                logger.warning(
+                    "adapter_exited_unexpectedly",
+                    exchange=adapter.exchange_name,
+                    hint="restarting in 5s",
+                )
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                logger.exception(
+                    "adapter_crashed",
+                    exchange=adapter.exchange_name,
+                    hint=f"restarting in {restart_delay}s",
+                )
+            if self._running:
+                await asyncio.sleep(restart_delay)
+
     def _build_adapters(self) -> None:
         """Create exchange adapters based on symbol mapper results."""
         for exchange in self.settings.enabled_exchanges:
@@ -535,12 +564,18 @@ class SpreadScanner:
         # Step 4: Start Telegram polling (for inline button callbacks)
         await self._telegram.start_polling()
 
-        # Step 5: Run all adapters concurrently
+        # Step 5: Run all adapters concurrently.
+        # Each adapter is wrapped in a supervisor that catches any crash
+        # and restarts that adapter independently, so one flaky exchange
+        # can never kill the entire bot.
         logger.info("starting_adapters", count=len(self._adapters))
-        tasks = [asyncio.create_task(adapter.start()) for adapter in self._adapters]
+        tasks = [
+            asyncio.create_task(self._supervise_adapter(adapter))
+            for adapter in self._adapters
+        ]
 
         try:
-            await asyncio.gather(*tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
         except asyncio.CancelledError:
             logger.info("scanner_cancelled")
 
@@ -610,11 +645,17 @@ async def async_main() -> None:
 
 
 def main() -> None:
-    """Synchronous entry point."""
-    try:
-        asyncio.run(async_main())
-    except KeyboardInterrupt:
-        pass
+    """Synchronous entry point. Auto-restarts on crash."""
+    while True:
+        try:
+            asyncio.run(async_main())
+            break  # clean shutdown — don't restart
+        except KeyboardInterrupt:
+            break
+        except Exception:
+            logger.exception("fatal_crash_restarting_in_10s")
+            import time
+            time.sleep(10)
 
 
 if __name__ == "__main__":
