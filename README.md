@@ -59,6 +59,16 @@ sudo systemctl enable --now spread-scanner-autodeploy.timer
 
 The timer checks `origin/main` every 5 minutes. On a new revision it runs `pip install -e .`, `pytest`, then restarts `spread-scanner.service`. If deploy validation fails, it rolls back to the previous revision.
 
+## Manual VPS Deploy
+
+To force the VPS to catch up to every commit missing from `origin/main`, run:
+
+```bash
+./deploy/pull-latest-to-vps.sh
+```
+
+The script prints the commits missing on the VPS, fast-forwards the remote checkout with `git pull --ff-only`, runs `pytest`, restarts `spread-scanner.service`, and prints the final deployed revision. It uses normal `ssh`, so it works with either SSH keys or an interactive password prompt.
+
 ## Architecture
 
 ```
