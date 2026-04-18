@@ -321,14 +321,37 @@ class TelegramSender:
         uptime_h = uptime_s // 3600
         uptime_m = (uptime_s % 3600) // 60
 
-        # Count active exchanges (those with at least 1 snapshot)
-        active_exchanges: dict[str, int] = {}
+        # Count live snapshots per exchange (= exchanges whose WS is feeding us)
+        live_exchanges: dict[str, int] = {}
         for (ex, _sym), _snap in scanner._snapshots.items():
-            active_exchanges[ex] = active_exchanges.get(ex, 0) + 1
+            live_exchanges[ex] = live_exchanges.get(ex, 0) + 1
 
-        exchanges_str = "\n".join(
-            f"  {ex}: {cnt} symbols" for ex, cnt in sorted(active_exchanges.items())
-        ) or "  (none connected)"
+        # Enumerate ALL exchanges in config — including ones that failed bootstrap
+        # or whose WS never connected. Surfacing those silently-dead exchanges
+        # was the whole point of the diagnostic: previously they were invisible
+        # because this section only listed exchanges with snapshots.
+        mapper = getattr(scanner, "_mapper", None)
+        enabled = list(getattr(scanner.settings, "enabled_exchanges", []))
+
+        exchange_lines: list[str] = []
+        for ex in sorted(enabled):
+            mapped = len(mapper.get_exchange_symbols(ex)) if mapper else 0
+            live = live_exchanges.get(ex, 0)
+            err = mapper.get_bootstrap_error(ex) if mapper else "no_mapper"
+
+            if err:
+                # Bootstrap failed — show the error explicitly.
+                exchange_lines.append(f"  ❌ {ex}: bootstrap failed ({err})")
+            elif mapped == 0:
+                exchange_lines.append(f"  ⚠️ {ex}: ok but 0 symbols mapped")
+            elif live == 0:
+                # Bootstrap ok, symbols available, but no live WS snapshots.
+                # Likely a WS connect loop; supervisor will keep retrying.
+                exchange_lines.append(f"  🔌 {ex}: {mapped} mapped, 0 live (ws down?)")
+            else:
+                exchange_lines.append(f"  ✅ {ex}: {live}/{mapped} live")
+
+        exchanges_str = "\n".join(exchange_lines) or "  (no exchanges configured)"
 
         last_spread = diag.get("last_spread_alert_ts")
         last_spread_str = last_spread.strftime("%H:%M:%S UTC") if last_spread else "never"

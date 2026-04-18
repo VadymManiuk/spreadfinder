@@ -11,6 +11,8 @@ Assumptions:
     for spread detection, since they trade near $1 parity.
 """
 
+import asyncio
+
 import structlog
 import aiohttp
 
@@ -18,6 +20,16 @@ from symbol_mapper.exchange_symbols import EXCHANGE_CONFIGS, ExchangeConfig
 from symbol_mapper.ticker_aliases import normalize_base, TICKER_COLLISIONS
 
 logger = structlog.get_logger(__name__)
+
+# Per-exchange REST bootstrap timeout. Without this, a single slow/hung
+# endpoint blocks the entire startup. 15s is enough for any healthy exchange
+# and short enough that a geo-blocked IP fails fast.
+_BOOTSTRAP_TIMEOUT_S = 15
+
+# Retry bootstrap on transient DNS / network failures instead of permanently
+# starting the bot with a half-empty symbol map after one bad startup window.
+_BOOTSTRAP_MAX_ATTEMPTS = 4
+_BOOTSTRAP_RETRY_DELAY_S = 5.0
 
 
 class SymbolMapper:
@@ -42,6 +54,9 @@ class SymbolMapper:
         self._native_to_canonical: dict[str, dict[str, str]] = {}
         # exchange -> {canonical_symbol -> native_symbol}
         self._canonical_to_native: dict[str, dict[str, str]] = {}
+        # exchange -> last bootstrap error message (None on success).
+        # Surfaced by /status so a REST failure is visible without tailing logs.
+        self._bootstrap_errors: dict[str, str | None] = {}
 
     async def bootstrap(self, session: aiohttp.ClientSession | None = None) -> None:
         """
@@ -54,29 +69,82 @@ class SymbolMapper:
             session = aiohttp.ClientSession()
 
         try:
+            configs_to_load: list[ExchangeConfig] = []
             for name in self._exchange_names:
                 config = EXCHANGE_CONFIGS.get(name)
                 if not config:
                     logger.warning("unknown_exchange", exchange=name)
+                    self._bootstrap_errors[name] = "unknown_exchange"
                     continue
-                await self._load_exchange(session, config)
+                configs_to_load.append(config)
+
+            pending_configs = list(configs_to_load)
+            for attempt in range(1, _BOOTSTRAP_MAX_ATTEMPTS + 1):
+                if not pending_configs:
+                    break
+
+                # Fetch pending exchanges in parallel. One slow / blocked REST
+                # endpoint must not delay bootstrap for the healthy ones.
+                tasks = [
+                    self._load_exchange(session, config)
+                    for config in pending_configs
+                ]
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+                pending_configs = [
+                    config
+                    for config in pending_configs
+                    if self.get_bootstrap_error(config.name) is not None
+                    or not self.get_exchange_symbols(config.name)
+                ]
+
+                if pending_configs and attempt < _BOOTSTRAP_MAX_ATTEMPTS:
+                    logger.warning(
+                        "symbol_bootstrap_retrying",
+                        attempt=attempt + 1,
+                        max_attempts=_BOOTSTRAP_MAX_ATTEMPTS,
+                        exchanges=[config.name for config in pending_configs],
+                        delay_seconds=_BOOTSTRAP_RETRY_DELAY_S,
+                    )
+                    await asyncio.sleep(_BOOTSTRAP_RETRY_DELAY_S)
         finally:
             if own_session:
                 await session.close()
 
         common = self.get_common_symbols()
+        failed = {
+            name: self.get_bootstrap_error(name) or "0 symbols mapped"
+            for name in self._exchange_names
+            if not self.get_exchange_symbols(name)
+        }
+        if failed:
+            logger.warning(
+                "symbol_mapper_incomplete",
+                successes=len(self._exchange_names) - len(failed),
+                failures=failed,
+            )
         logger.info(
             "symbol_mapper_ready",
             exchanges=self._exchange_names,
             total_common_symbols=len(common),
+            successful_exchanges=len(self._exchange_names) - len(failed),
+            failed_exchanges=len(failed),
         )
 
     async def _load_exchange(
         self, session: aiohttp.ClientSession, config: ExchangeConfig
     ) -> None:
-        """Fetch and parse symbols for one exchange."""
+        """
+        Fetch and parse symbols for one exchange.
+
+        Failures (timeout, geo-block, HTTP error, parse error) are caught so
+        one bad exchange never breaks bootstrap for the others. The error
+        message is stored in self._bootstrap_errors so /status can surface it.
+        """
         native_to_canon: dict[str, str] = {}
         canon_to_native: dict[str, str] = {}
+        error_msg: str | None = None
+        timeout = aiohttp.ClientTimeout(total=_BOOTSTRAP_TIMEOUT_S)
 
         try:
             if config.name == "hyperliquid":
@@ -85,11 +153,12 @@ class SymbolMapper:
                     config.rest_url,
                     json={"type": "metaAndAssetCtxs"},
                     headers={"Content-Type": "application/json"},
+                    timeout=timeout,
                 ) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
             else:
-                async with session.get(config.rest_url) as resp:
+                async with session.get(config.rest_url, timeout=timeout) as resp:
                     resp.raise_for_status()
                     data = await resp.json()
 
@@ -113,11 +182,26 @@ class SymbolMapper:
                 native_to_canon[native] = canonical
                 canon_to_native[canonical] = native
 
-        except Exception:
+        except asyncio.TimeoutError:
+            error_msg = f"timeout after {_BOOTSTRAP_TIMEOUT_S}s"
+            logger.warning("symbol_fetch_timeout", exchange=config.name, seconds=_BOOTSTRAP_TIMEOUT_S)
+        except aiohttp.ClientResponseError as exc:
+            # HTTP error: likely 451 (geo-block), 403, 429, etc.
+            error_msg = f"HTTP {exc.status} {exc.message}"
+            logger.warning(
+                "symbol_fetch_http_error",
+                exchange=config.name,
+                status=exc.status,
+                message=exc.message,
+            )
+        except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
             logger.exception("symbol_fetch_failed", exchange=config.name)
 
         self._native_to_canonical[config.name] = native_to_canon
         self._canonical_to_native[config.name] = canon_to_native
+        # Record outcome: None == success, string == last error.
+        self._bootstrap_errors[config.name] = error_msg
 
     def load_static(self, exchange: str, mapping: dict[str, str]) -> None:
         """
@@ -151,6 +235,15 @@ class SymbolMapper:
     def get_exchange_symbols(self, exchange: str) -> set[str]:
         """Get all canonical symbols available on one exchange."""
         return set(self._canonical_to_native.get(exchange, {}).keys())
+
+    def get_bootstrap_error(self, exchange: str) -> str | None:
+        """
+        Return the last bootstrap error for an exchange, or None if it succeeded.
+        Returns the literal string 'not_attempted' if bootstrap never ran for it.
+        """
+        if exchange not in self._bootstrap_errors:
+            return "not_attempted"
+        return self._bootstrap_errors[exchange]
 
     def get_common_symbols(self, exchanges: list[str] | None = None) -> set[str]:
         """

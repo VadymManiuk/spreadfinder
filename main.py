@@ -61,6 +61,7 @@ _kill_old_instances()
 # ---- End single-instance lock ----
 
 import asyncio
+import math
 import signal
 import sys
 import time as _time
@@ -91,6 +92,12 @@ from models.snapshot import MarketSnapshot
 from pump_detector import PriceHistory, PumpDetector
 
 logger = structlog.get_logger(__name__)
+
+# If bootstrap succeeds for too few enabled exchanges, the bot should fail
+# fast and let systemd retry. Running for hours on 2/8 exchanges is worse
+# than restarting until DNS / REST connectivity recovers.
+_MIN_BOOTSTRAP_SUCCESS_COUNT = 2
+_MIN_BOOTSTRAP_SUCCESS_RATIO = 0.6
 
 
 class SpreadScanner:
@@ -417,6 +424,42 @@ class SpreadScanner:
             if self._running:
                 await asyncio.sleep(restart_delay)
 
+    def _validate_bootstrap_health(self) -> None:
+        """Abort startup if symbol bootstrap is too degraded to trade on."""
+        enabled = list(self.settings.enabled_exchanges)
+        ready = [
+            exchange
+            for exchange in enabled
+            if self._mapper.get_exchange_symbols(exchange)
+        ]
+        failed = {
+            exchange: self._mapper.get_bootstrap_error(exchange) or "0 symbols mapped"
+            for exchange in enabled
+            if not self._mapper.get_exchange_symbols(exchange)
+        }
+        min_required = min(
+            len(enabled),
+            max(
+                _MIN_BOOTSTRAP_SUCCESS_COUNT,
+                math.ceil(len(enabled) * _MIN_BOOTSTRAP_SUCCESS_RATIO),
+            ),
+        )
+
+        logger.info(
+            "bootstrap_health",
+            enabled_count=len(enabled),
+            ready_count=len(ready),
+            min_required=min_required,
+            ready=ready,
+            failed=failed,
+        )
+
+        if len(ready) < min_required:
+            raise RuntimeError(
+                f"bootstrap too degraded: {len(ready)}/{len(enabled)} exchanges ready "
+                f"(need at least {min_required})"
+            )
+
     def _build_adapters(self) -> None:
         """Create exchange adapters based on symbol mapper results."""
         for exchange in self.settings.enabled_exchanges:
@@ -522,6 +565,7 @@ class SpreadScanner:
         # Step 1: Bootstrap symbol mapper
         logger.info("bootstrapping_symbol_mapper")
         await self._mapper.bootstrap()
+        self._validate_bootstrap_health()
 
         # Step 1b: Build cross-quote matchable pairs (all tokens, no market cap filter)
         matchable = self._mapper.get_matchable_pairs()
@@ -542,8 +586,7 @@ class SpreadScanner:
         self._build_adapters()
 
         if not self._adapters:
-            logger.error("no_adapters_created", hint="Check exchange configs and symbol availability")
-            return
+            raise RuntimeError("no adapters created from bootstrap results")
 
         # Step 3: Start deposit/withdrawal checker
         await self._deposit_checker.start()

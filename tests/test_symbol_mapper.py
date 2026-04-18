@@ -290,3 +290,36 @@ class TestMatchablePairs:
             base_a = SymbolMapper.extract_base(p["canonical_a"])
             base_b = SymbolMapper.extract_base(p["canonical_b"])
             assert base_a == base_b
+
+
+class TestBootstrapRetries:
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_retries_only_failed_exchanges(self, monkeypatch):
+        mapper = SymbolMapper(exchanges=["binance", "gate"])
+        attempts = {"binance": 0, "gate": 0}
+
+        async def fake_load_exchange(_session, config):
+            attempts[config.name] += 1
+            if config.name == "binance" and attempts[config.name] == 1:
+                mapper._native_to_canonical[config.name] = {}
+                mapper._canonical_to_native[config.name] = {}
+                mapper._bootstrap_errors[config.name] = "dns failure"
+                return
+
+            mapper._native_to_canonical[config.name] = {"BTC": "BTC-USDT-PERP"}
+            mapper._canonical_to_native[config.name] = {"BTC-USDT-PERP": "BTC"}
+            mapper._bootstrap_errors[config.name] = None
+
+        async def fake_sleep(_delay):
+            return None
+
+        monkeypatch.setattr(mapper, "_load_exchange", fake_load_exchange)
+        monkeypatch.setattr("symbol_mapper.mapper.asyncio.sleep", fake_sleep)
+
+        await mapper.bootstrap(session=object())
+
+        assert attempts["binance"] == 2
+        assert attempts["gate"] == 1
+        assert mapper.get_bootstrap_error("binance") is None
+        assert mapper.get_bootstrap_error("gate") is None
