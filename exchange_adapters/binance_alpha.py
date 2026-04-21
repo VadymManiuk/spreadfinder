@@ -1,0 +1,168 @@
+"""
+Binance Alpha REST polling adapter.
+
+Inputs: Allowed futures base set and snapshot callback.
+Outputs: Normalized DEX-style MarketSnapshot objects via callback.
+Assumptions:
+  - Polls Binance Alpha's public token list endpoint.
+  - Uses the token list's latest price, 24h volume, and liquidity fields.
+  - Emits only tokens whose normalized base exists on at least one futures venue.
+  - Skips ambiguous tickers listed in TICKER_COLLISIONS to avoid false matches.
+"""
+
+import asyncio
+from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation
+
+import aiohttp
+import structlog
+
+from exchange_adapters.base import BaseExchangeAdapter, SnapshotCallback
+from exchange_adapters.dex_common import estimate_size_from_liquidity
+from models.snapshot import MarketSnapshot
+from symbol_mapper.ticker_aliases import TICKER_COLLISIONS, normalize_base
+
+logger = structlog.get_logger(__name__)
+
+TOKEN_LIST_URL = (
+    "https://www.binance.com/bapi/defi/v1/public/"
+    "wallet-direct/buw/wallet/cex/alpha/all/token/list"
+)
+
+
+class BinanceAlphaAdapter(BaseExchangeAdapter):
+    """
+    Poll Binance Alpha and emit DEX snapshots for futures-listed base assets.
+    """
+
+    def __init__(
+        self,
+        allowed_bases: set[str],
+        on_snapshot: SnapshotCallback,
+        poll_interval_seconds: float = 30.0,
+        stale_threshold_seconds: float = 90.0,
+    ):
+        super().__init__(
+            exchange_name="binance_alpha",
+            on_snapshot=on_snapshot,
+            stale_threshold_seconds=stale_threshold_seconds,
+        )
+        self._allowed_bases = set(allowed_bases)
+        self._poll_interval_seconds = poll_interval_seconds
+        self._http_session: aiohttp.ClientSession | None = None
+
+    async def _connect(self) -> None:
+        self._http_session = aiohttp.ClientSession()
+        self._log.info(
+            "connecting",
+            url=TOKEN_LIST_URL,
+            allowed_bases=len(self._allowed_bases),
+        )
+
+    async def _disconnect(self) -> None:
+        if self._http_session:
+            await self._http_session.close()
+            self._http_session = None
+
+    async def _subscribe(self) -> None:
+        """No-op for REST polling adapters."""
+
+    async def _listen(self) -> None:
+        if not self._http_session:
+            return
+
+        while self._running:
+            await self._poll_once()
+            await asyncio.sleep(self._poll_interval_seconds)
+
+    async def _poll_once(self) -> None:
+        if not self._http_session:
+            return
+
+        async with self._http_session.get(TOKEN_LIST_URL) as resp:
+            resp.raise_for_status()
+            payload = await resp.json()
+
+        if payload.get("code") != "000000" or payload.get("success") is not True:
+            self._log.warning(
+                "binance_alpha_api_error",
+                code=payload.get("code"),
+                message=payload.get("message"),
+            )
+            return
+
+        emitted = 0
+        for token in payload.get("data", []):
+            snapshot = self._build_snapshot(token)
+            if snapshot is None:
+                continue
+            await self.on_snapshot(snapshot)
+            emitted += 1
+
+        self._update_heartbeat()
+        self._log.debug("binance_alpha_polled", emitted=emitted)
+
+    def _build_snapshot(self, token: dict) -> MarketSnapshot | None:
+        """
+        Convert one Binance Alpha token list entry into a MarketSnapshot.
+        """
+        if not isinstance(token, dict):
+            return None
+        if token.get("fullyDelisted") is True or token.get("offline") is True:
+            return None
+
+        base = self._select_base_symbol(token)
+        if not base:
+            return None
+
+        normalized_base = normalize_base(base)
+        if normalized_base in TICKER_COLLISIONS:
+            return None
+        if self._allowed_bases and normalized_base not in self._allowed_bases:
+            return None
+
+        try:
+            price = Decimal(str(token["price"]))
+            if price <= 0:
+                return None
+            volume_24h = Decimal(str(token["volume24h"]))
+            liquidity_raw = token.get("liquidity")
+            liquidity = (
+                Decimal(str(liquidity_raw))
+                if liquidity_raw not in (None, "")
+                else None
+            )
+        except (KeyError, InvalidOperation):
+            logger.debug("binance_alpha_token_skipped", reason="bad_numeric_fields")
+            return None
+
+        chain_id = str(token.get("chainId", "")).strip() or "unknown"
+        exchange = f"binance_alpha:{chain_id}"
+        size = estimate_size_from_liquidity(price, liquidity)
+
+        return MarketSnapshot(
+            canonical_symbol=f"{base}-{chain_id}-DEX",
+            exchange=exchange,
+            bid=price,
+            ask=price,
+            bid_size=size,
+            ask_size=size,
+            exchange_ts=None,
+            local_ts=datetime.now(timezone.utc),
+            volume_24h=volume_24h,
+            is_stale=False,
+        )
+
+    @staticmethod
+    def _select_base_symbol(token: dict) -> str:
+        """
+        Choose the futures-aligned base symbol when available.
+
+        Binance Alpha may expose a chain-native token symbol that differs from the
+        centralized listing ticker. When `cexCoinName` exists, prefer it so
+        multiplier tickers like 1000CHEEMS match futures correctly.
+        """
+        cex_name = str(token.get("cexCoinName", "")).strip().upper()
+        if cex_name:
+            return cex_name
+        return str(token.get("symbol", "")).strip().upper()

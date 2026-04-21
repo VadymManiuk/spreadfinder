@@ -17,6 +17,7 @@ import structlog
 from models.snapshot import MarketSnapshot, SpreadOpportunity
 from spread_engine.confidence import calculate_confidence
 from symbol_mapper.ticker_aliases import normalize_base
+from utils.venues import exchange_family
 
 logger = structlog.get_logger(__name__)
 
@@ -39,6 +40,8 @@ DEFAULT_FEES: dict[str, tuple[Decimal, Decimal]] = {
     "aster":       (Decimal("0.0002"), Decimal("0.0005")),   # 0.02% maker, 0.05% taker   # ESTIMATE
     "lighter":     (Decimal("0.0002"), Decimal("0.0005")),   # 0.02% maker, 0.05% taker   # ESTIMATE
     "mexc":        (Decimal("0.0002"), Decimal("0.0006")),   # 0.02% maker, 0.06% taker   # ESTIMATE
+    "okx_dex":     (Decimal("0.0030"), Decimal("0.0030")),   # ~0.30% swap cost            # ESTIMATE
+    "binance_alpha": (Decimal("0.0030"), Decimal("0.0030")), # ~0.30% swap cost            # ESTIMATE
 }
 
 # Slippage factor as fraction of mid price
@@ -57,7 +60,10 @@ def _get_fee_rate(exchange: str, side: str) -> Decimal:
     Returns:
         Fee rate as a decimal fraction (e.g. 0.0004 for 0.04%).
     """
-    rates = DEFAULT_FEES.get(exchange, (Decimal("0.0005"), Decimal("0.0005")))
+    rates = DEFAULT_FEES.get(
+        exchange_family(exchange),
+        (Decimal("0.0005"), Decimal("0.0005")),
+    )
     return rates[0] if side == "maker" else rates[1]
 
 

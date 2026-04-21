@@ -284,9 +284,9 @@ class TestFilterChain:
         )
         passed, results = chain.evaluate(make_opp())
         assert not passed
-        # Should have stopped at first filter
-        assert len(results) == 1
-        assert results[0].filter_name == "min_gross_spread"
+        # Should stop immediately after the first real threshold failure.
+        assert len(results) == 2
+        assert results[1].filter_name == "min_gross_spread"
 
     def test_configurable_max_gross_spread_can_allow_large_moves(self):
         chain = FilterChain(
@@ -347,3 +347,85 @@ class TestFilterChain:
         chain.clear_state()
         passed, _ = chain.evaluate(opp)
         assert passed
+
+    def test_dex_route_uses_stricter_net_spread_threshold(self):
+        chain = FilterChain(
+            min_gross_spread_bps=Decimal("1"),
+            min_net_spread_bps=Decimal("100"),
+            dex_min_net_spread_bps=Decimal("1000"),
+            dex_min_volume_24h=Decimal("2000000"),
+            min_bid_size=Decimal("1"),
+            min_ask_size=Decimal("1"),
+            max_data_age_ms=5000,
+            min_confidence=Decimal("0.0"),
+            cooldown_seconds=0,
+            persistence_ms=0,
+        )
+        opp = make_opp(
+            buy_exchange="binance_alpha:56",
+            sell_exchange="gate",
+            gross_spread_bps=Decimal("1200"),
+            net_spread_bps=Decimal("900"),
+            buy_volume_24h=Decimal("3000000"),
+        )
+
+        passed, results = chain.evaluate(opp)
+
+        assert not passed
+        failed = [r for r in results if not r.passed]
+        assert failed[0].filter_name == "min_net_spread"
+
+    def test_dex_route_requires_min_dex_volume(self):
+        chain = FilterChain(
+            min_gross_spread_bps=Decimal("1"),
+            min_net_spread_bps=Decimal("100"),
+            dex_min_net_spread_bps=Decimal("1000"),
+            dex_min_volume_24h=Decimal("2000000"),
+            min_bid_size=Decimal("1"),
+            min_ask_size=Decimal("1"),
+            max_data_age_ms=5000,
+            min_confidence=Decimal("0.0"),
+            cooldown_seconds=0,
+            persistence_ms=0,
+        )
+        opp = make_opp(
+            buy_exchange="okx_dex:8453",
+            sell_exchange="gate",
+            gross_spread_bps=Decimal("1500"),
+            net_spread_bps=Decimal("1400"),
+            buy_volume_24h=Decimal("1500000"),
+        )
+
+        passed, results = chain.evaluate(opp)
+
+        assert not passed
+        failed = [r for r in results if not r.passed]
+        assert failed[0].filter_name == "min_dex_volume"
+
+    def test_dex_disabled_blocks_dex_route(self):
+        chain = FilterChain(
+            dex_enabled=False,
+            min_gross_spread_bps=Decimal("1"),
+            min_net_spread_bps=Decimal("100"),
+            dex_min_net_spread_bps=Decimal("1000"),
+            dex_min_volume_24h=Decimal("2000000"),
+            min_bid_size=Decimal("1"),
+            min_ask_size=Decimal("1"),
+            max_data_age_ms=5000,
+            min_confidence=Decimal("0.0"),
+            cooldown_seconds=0,
+            persistence_ms=0,
+        )
+        opp = make_opp(
+            buy_exchange="binance_alpha:56",
+            sell_exchange="gate",
+            gross_spread_bps=Decimal("1500"),
+            net_spread_bps=Decimal("1400"),
+            buy_volume_24h=Decimal("3000000"),
+        )
+
+        passed, results = chain.evaluate(opp)
+
+        assert not passed
+        failed = [r for r in results if not r.passed]
+        assert failed[0].filter_name == "dex_enabled"

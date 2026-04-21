@@ -208,6 +208,12 @@ class TestFeeEstimation:
         # fees = (0.0005 + 0.0005) * 1.0 * 2 = 0.0020
         assert fees == Decimal("0.0020")
 
+    def test_dex_exchange_family_uses_dex_fee_estimate(self):
+        fees = _estimate_fees("binance_alpha:56", "gate", Decimal("1.0"))
+        # taker_buy(binance_alpha) = 0.0030, maker_sell(gate) = 0.00015
+        # fees = (0.0030 + 0.00015) * 1.0 * 2 = 0.00630
+        assert fees == Decimal("0.00630")
+
     def test_slippage(self):
         slippage = _estimate_slippage(Decimal("1.0000"))
         # SLIPPAGE_FACTOR = 0.0001

@@ -154,6 +154,49 @@ class AdapterSettings(BaseSettings):
     meta_poll_interval_seconds: float = 30.0
 
 
+class DexSettings(BaseSettings):
+    """
+    DEX-to-futures alert configuration.
+
+    DEX sources are polled via REST and compared against live futures quotes.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="DEX_", **_ENV_FILE_CONFIG)
+
+    # Master switch for DEX spread alert delivery
+    enabled: bool = True
+
+    # Source toggles
+    okx_enabled: bool = True
+    binance_alpha_enabled: bool = True
+
+    # Polling cadence
+    poll_interval_seconds: int = 30
+
+    # DEX route quality thresholds
+    min_net_spread_pct: Decimal = Decimal("10.0")
+    min_volume_24h: Decimal = Decimal("2000000")
+
+    # Comma-separated OKX chain indices for the top-volume scan
+    # Base default matches the user-requested example.
+    okx_chain_indices: str = "8453"
+
+
+class OkxAuthSettings(BaseSettings):
+    """
+    Shared OKX API credentials.
+
+    Used for both wallet/asset endpoints and authenticated DEX Market API calls.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="OKX_", **_ENV_FILE_CONFIG)
+
+    api_key: str = ""
+    api_secret: str = ""
+    passphrase: str = ""
+    project_id: str = ""
+
+
 class Settings(BaseSettings):
     """
     Root settings object. Loads all config from environment variables and .env file.
@@ -172,6 +215,8 @@ class Settings(BaseSettings):
     fees: ExchangeFees = Field(default_factory=ExchangeFees)
     adapter: AdapterSettings = Field(default_factory=AdapterSettings)
     pump: PumpSettings = Field(default_factory=PumpSettings)
+    dex: DexSettings = Field(default_factory=DexSettings)
+    okx_auth: OkxAuthSettings = Field(default_factory=OkxAuthSettings)
 
     # Logging
     log_level: str = "INFO"

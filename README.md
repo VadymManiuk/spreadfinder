@@ -1,6 +1,6 @@
 # Spread Scanner Bot
 
-Real-time crypto futures spread scanner. Monitors perpetual markets on **Binance**, **Hyperliquid**, and **Gate**. Detects cross-exchange spread opportunities and sends **Telegram alerts**.
+Real-time crypto spread scanner. Monitors perpetual markets on **Binance**, **Hyperliquid**, and **Gate**, and can also compare **DEX spot/aggregator prices** against futures. Detects spread opportunities and sends **Telegram alerts**.
 
 **Target:** Small-cap tokens (<$200M market cap). Alerting only — no execution.
 
@@ -72,14 +72,14 @@ The script prints the commits missing on the VPS, fast-forwards the remote check
 ## Architecture
 
 ```
-Exchange Adapters (WS) → Symbol Mapper → MarketSnapshot → Spread Engine → Filters → Telegram
+Exchange Adapters / DEX Pollers → Symbol Mapper → MarketSnapshot → Spread Engine → Filters → Telegram
 ```
 
 | Component | Directory | Description |
 |-----------|-----------|-------------|
 | Models | `models/` | `MarketSnapshot`, `SpreadOpportunity` (Pydantic, frozen, Decimal) |
 | Symbol Mapper | `symbol_mapper/` | Cross-exchange normalization to `{BASE}-{QUOTE}-PERP` |
-| Exchange Adapters | `exchange_adapters/` | Binance, Hyperliquid, Gate — WebSocket + REST |
+| Exchange Adapters | `exchange_adapters/` | Futures WebSocket adapters plus DEX REST pollers |
 | Spread Engine | `spread_engine/` | Gross/net spread calculation, confidence scoring |
 | Filters | `filters/` | Configurable quality gates, cooldowns, persistence |
 | Alerting | `alerting/` | Telegram MarkdownV2 alerts |
@@ -98,6 +98,9 @@ estimated_slippage = slippage_factor * mid_price
 
 Both directions (A→B and B→A) are checked for every symbol pair.
 
+For `DEX -> futures` routes, the bot only alerts on the actionable direction:
+buy on DEX, sell/short on futures.
+
 ## Configuration
 
 All settings are in `.env`. See `.env.example` for the full list with defaults.
@@ -111,6 +114,32 @@ All settings are in `.env`. See `.env.example` for the full list with defaults.
 | `PERSISTENCE_MS` | 1000 | Spread must persist this long before alert |
 | `MAX_DATA_AGE_MS` | 2000 | Maximum acceptable data staleness |
 | `MIN_CONFIDENCE` | 0.3 | Minimum confidence score (0.0–1.0) |
+
+### DEX Alert Settings
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `DEX_ENABLED` | `true` | Master switch for DEX -> futures alerts |
+| `DEX_OKX_ENABLED` | `true` | Enable authenticated OKX DEX volume scan |
+| `DEX_BINANCE_ALPHA_ENABLED` | `true` | Enable Binance Alpha token scan |
+| `DEX_POLL_INTERVAL_SECONDS` | `30` | REST polling cadence for DEX sources |
+| `DEX_MIN_NET_SPREAD_PCT` | `10.0` | Minimum DEX route net spread in percent |
+| `DEX_MIN_VOLUME_24H` | `2000000` | Minimum DEX-side 24h volume in USD |
+| `DEX_OKX_CHAIN_INDICES` | `8453` | Comma-separated OKX chain indices to scan |
+
+### OKX Credentials
+
+OKX DEX Market API is authenticated. Add the following to `.env` to enable the OKX DEX source:
+
+```bash
+OKX_API_KEY=...
+OKX_API_SECRET=...
+OKX_PASSPHRASE=...
+# Optional for some projects/endpoints:
+OKX_PROJECT_ID=...
+```
+
+Binance Alpha uses public endpoints and does not need credentials.
 
 ## License
 

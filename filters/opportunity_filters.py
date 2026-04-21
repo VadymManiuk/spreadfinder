@@ -12,6 +12,7 @@ import time
 from decimal import Decimal
 
 from models.snapshot import SpreadOpportunity
+from utils.venues import is_dex_exchange
 
 
 class FilterResult:
@@ -46,6 +47,13 @@ def check_min_net_spread(opp: SpreadOpportunity, min_bps: Decimal) -> FilterResu
             f"net_spread_bps={opp.net_spread_bps:.1f} < {min_bps}",
         )
     return FilterResult(True, "min_net_spread")
+
+
+def check_dex_enabled(opp: SpreadOpportunity, enabled: bool) -> FilterResult:
+    """Reject DEX routes when DEX alerting is disabled at runtime."""
+    if (is_dex_exchange(opp.buy_exchange) or is_dex_exchange(opp.sell_exchange)) and not enabled:
+        return FilterResult(False, "dex_enabled", "dex alerts disabled")
+    return FilterResult(True, "dex_enabled")
 
 
 def check_min_bid_size(opp: SpreadOpportunity, min_size: Decimal) -> FilterResult:
@@ -84,6 +92,34 @@ def check_min_volume(opp: SpreadOpportunity, min_volume: Decimal | None) -> Filt
             f"sell_volume_24h={opp.sell_volume_24h} < {min_volume}",
         )
     return FilterResult(True, "min_volume")
+
+
+def check_min_dex_volume(opp: SpreadOpportunity, min_volume: Decimal | None) -> FilterResult:
+    """
+    Reject DEX routes whose DEX-side 24h volume is below threshold.
+
+    Unlike the generic volume filter, missing DEX volume is treated as a hard
+    rejection because the user explicitly wants a minimum on-chain turnover.
+    """
+    if min_volume is None:
+        return FilterResult(True, "min_dex_volume")
+
+    if is_dex_exchange(opp.buy_exchange):
+        dex_volume = opp.buy_volume_24h
+    elif is_dex_exchange(opp.sell_exchange):
+        dex_volume = opp.sell_volume_24h
+    else:
+        return FilterResult(True, "min_dex_volume")
+
+    if dex_volume is None:
+        return FilterResult(False, "min_dex_volume", "dex_volume_24h missing")
+    if dex_volume < min_volume:
+        return FilterResult(
+            False,
+            "min_dex_volume",
+            f"dex_volume_24h={dex_volume} < {min_volume}",
+        )
+    return FilterResult(True, "min_dex_volume")
 
 
 def check_max_data_age(opp: SpreadOpportunity, max_age_ms: int) -> FilterResult:

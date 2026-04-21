@@ -17,15 +17,18 @@ from filters.opportunity_filters import (
     FilterResult,
     CooldownFilter,
     PersistenceFilter,
+    check_dex_enabled,
     check_min_gross_spread,
     check_max_gross_spread,
     check_min_net_spread,
     check_min_bid_size,
     check_min_ask_size,
     check_min_volume,
+    check_min_dex_volume,
     check_max_data_age,
     check_min_confidence,
 )
+from utils.venues import is_dex_exchange
 
 logger = structlog.get_logger(__name__)
 
@@ -50,6 +53,9 @@ class FilterChain:
         min_gross_spread_bps: Decimal = Decimal("10.0"),
         max_gross_spread_bps: Decimal = Decimal("50000.0"),  # 500% — effectively disabled
         min_net_spread_bps: Decimal = Decimal("5.0"),
+        dex_enabled: bool = True,
+        dex_min_net_spread_bps: Decimal = Decimal("1000.0"),
+        dex_min_volume_24h: Decimal | None = Decimal("2000000"),
         min_bid_size: Decimal = Decimal("100.0"),
         min_ask_size: Decimal = Decimal("100.0"),
         min_volume_24h: Decimal | None = None,
@@ -61,6 +67,9 @@ class FilterChain:
         self.min_gross_spread_bps = min_gross_spread_bps
         self.max_gross_spread_bps = max_gross_spread_bps
         self.min_net_spread_bps = min_net_spread_bps
+        self.dex_enabled = dex_enabled
+        self.dex_min_net_spread_bps = dex_min_net_spread_bps
+        self.dex_min_volume_24h = dex_min_volume_24h
         self.min_bid_size = min_bid_size
         self.min_ask_size = min_ask_size
         self.min_volume_24h = min_volume_24h
@@ -79,14 +88,20 @@ class FilterChain:
             results contains all checked FilterResults (including the failing one).
         """
         results: list[FilterResult] = []
+        is_dex_route = is_dex_exchange(opp.buy_exchange) or is_dex_exchange(opp.sell_exchange)
+        min_net_spread_bps = (
+            self.dex_min_net_spread_bps if is_dex_route else self.min_net_spread_bps
+        )
 
         checks = [
+            lambda: check_dex_enabled(opp, self.dex_enabled),
             lambda: check_min_gross_spread(opp, self.min_gross_spread_bps),
             lambda: check_max_gross_spread(opp, self.max_gross_spread_bps),
-            lambda: check_min_net_spread(opp, self.min_net_spread_bps),
+            lambda: check_min_net_spread(opp, min_net_spread_bps),
             lambda: check_min_bid_size(opp, self.min_bid_size),
             lambda: check_min_ask_size(opp, self.min_ask_size),
             lambda: check_min_volume(opp, self.min_volume_24h),
+            lambda: check_min_dex_volume(opp, self.dex_min_volume_24h),
             lambda: check_max_data_age(opp, self.max_data_age_ms),
             lambda: check_min_confidence(opp, self.min_confidence),
             lambda: self._cooldown.check(opp),

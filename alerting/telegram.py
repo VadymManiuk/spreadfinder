@@ -40,12 +40,28 @@ SPREAD_FILTER_OPTIONS = [
 # Persistent bottom keyboard buttons
 BOTTOM_MENU_KEYBOARD = {
     "keyboard": [
-        [{"text": "⚙️ Spread"}, {"text": "🚀 Pump"}],
-        [{"text": "📊 Status"}, {"text": "❓ Help"}],
+        [{"text": "⚙️ Spread"}, {"text": "🧬 DEX"}],
+        [{"text": "🚀 Pump"}, {"text": "📊 Status"}],
+        [{"text": "❓ Help"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
 }
+
+# Inline quick-select options for the DEX panel.
+# Threshold in %, volume floor in USD.
+DEX_SPREAD_OPTIONS = [
+    {"label": "> 10%", "value": 10.0},
+    {"label": "> 15%", "value": 15.0},
+    {"label": "> 20%", "value": 20.0},
+    {"label": "> 30%", "value": 30.0},
+]
+DEX_VOL_OPTIONS = [
+    {"label": "$1M", "value": 1_000_000},
+    {"label": "$2M", "value": 2_000_000},
+    {"label": "$5M", "value": 5_000_000},
+    {"label": "$10M", "value": 10_000_000},
+]
 
 # Inline quick-select options for the pump panel.
 # Threshold in %, window in minutes, volume floor in USD.
@@ -359,6 +375,14 @@ class TelegramSender:
 
         last_pump = diag.get("last_pump_ts")
         last_pump_str = last_pump.strftime("%H:%M:%S UTC") if last_pump else "never"
+        chain = self._get_filter_chain()
+        dex_enabled = bool(getattr(chain, "dex_enabled", False)) if chain else False
+        dex_min_pct = (
+            float(getattr(chain, "dex_min_net_spread_bps", 0)) / 100.0
+            if chain
+            else 0.0
+        )
+        dex_min_vol = float(getattr(chain, "dex_min_volume_24h", 0) or 0) if chain else 0.0
 
         matchable_count = sum(len(v) for v in scanner._match_lookup.values()) // 2
 
@@ -378,6 +402,12 @@ class TelegramSender:
             f"Flush errors:   {diag['flush_errors']:,}\n"
             f"Last alert:     {last_spread_str} {last_spread_sym}\n"
             f"TG filter:      > {current:g}%\n\n"
+            f"── DEX Alerts ──\n"
+            f"Sent:           {diag.get('dex_spreads_sent', 0):,}\n"
+            f"Bad direction:  {diag.get('dex_rejected_direction', 0):,}\n"
+            f"Enabled:        {'yes' if dex_enabled else 'no'}\n"
+            f"Min net:        > {dex_min_pct:g}%\n"
+            f"Min DEX vol:    ${dex_min_vol:,.0f}\n\n"
             f"── Pump Alerts ──\n"
             f"Sent:           {diag['pumps_sent']:,}\n"
             f"Last alert:     {last_pump_str}\n"
@@ -411,6 +441,11 @@ class TelegramSender:
         commands = [
             {"command": "filter", "description": "Open spread filter panel"},
             {"command": "setmin", "description": "Set minimum spread % (e.g. /setmin 2.5)"},
+            {"command": "dex", "description": "Open DEX alert panel"},
+            {"command": "setdex", "description": "Set min DEX net spread % (e.g. /setdex 10)"},
+            {"command": "setdexvol", "description": "Set min DEX 24h vol (e.g. /setdexvol 2000000)"},
+            {"command": "dexon", "description": "Enable DEX alerts"},
+            {"command": "dexoff", "description": "Disable DEX alerts"},
             {"command": "pump", "description": "Open pump alert panel"},
             {"command": "setpump", "description": "Set min pump %  (e.g. /setpump 5)"},
             {"command": "setpumptime", "description": "Set pump window minutes (e.g. /setpumptime 60)"},
@@ -547,6 +582,8 @@ class TelegramSender:
             except (ValueError, IndexError):
                 await self._answer_callback(callback_id, "Invalid filter")
 
+        elif data.startswith("dex_"):
+            await self._handle_dex_callback(data, callback, callback_id, chat_id)
         elif data.startswith("pump_"):
             await self._handle_pump_callback(data, callback, callback_id, chat_id)
 
@@ -558,6 +595,8 @@ class TelegramSender:
         # Bottom menu button presses
         if text in ("⚙️ Spread", "⚙️ Settings"):
             await self._send_filter_status(chat_id)
+        elif text == "🧬 DEX":
+            await self._send_dex_panel(chat_id)
         elif text == "🚀 Pump":
             await self._send_pump_panel(chat_id)
         elif text == "📊 Status":
@@ -569,6 +608,16 @@ class TelegramSender:
             await self._handle_setmin(text, chat_id)
         elif text.startswith("/filter") or text.startswith("/settings"):
             await self._send_filter_status(chat_id)
+        elif text.startswith("/setdexvol"):
+            await self._handle_setdexvol(text, chat_id)
+        elif text.startswith("/setdex"):
+            await self._handle_setdex(text, chat_id)
+        elif text.startswith("/dexon"):
+            await self._handle_dex_toggle(chat_id, True)
+        elif text.startswith("/dexoff"):
+            await self._handle_dex_toggle(chat_id, False)
+        elif text.startswith("/dex"):
+            await self._send_dex_panel(chat_id)
         elif text.startswith("/setpumptime"):
             await self._handle_setpumptime(text, chat_id)
         elif text.startswith("/setpumpvol"):
@@ -631,6 +680,224 @@ class TelegramSender:
                 f"❌ Invalid number: {parts[1]}\n"
                 "Usage: /setmin 2.5"
             )
+
+    # ------------------------------------------------------------------
+    # /dex commands
+    # ------------------------------------------------------------------
+
+    def _get_filter_chain(self):
+        """Return the attached FilterChain, or None if not wired."""
+        return getattr(self, "filter_chain", None)
+
+    def _dex_is_enabled(self) -> bool:
+        chain = self._get_filter_chain()
+        return bool(getattr(chain, "dex_enabled", False)) if chain else False
+
+    def _dex_min_pct(self) -> float:
+        chain = self._get_filter_chain()
+        if chain is None:
+            return 0.0
+        return float(chain.dex_min_net_spread_bps) / 100.0
+
+    def _dex_min_volume(self) -> float:
+        chain = self._get_filter_chain()
+        if chain is None or chain.dex_min_volume_24h is None:
+            return 0.0
+        return float(chain.dex_min_volume_24h)
+
+    def _build_dex_keyboard(self) -> list[list[dict]]:
+        """
+        Inline keyboard for the DEX alert settings panel.
+        Rows: min spread, min DEX volume, enable toggle.
+        """
+        chain = self._get_filter_chain()
+        if chain is None:
+            return []
+
+        cur_pct = self._dex_min_pct()
+        cur_vol = self._dex_min_volume()
+        enabled = self._dex_is_enabled()
+
+        def row(prefix: str, options: list[dict], current) -> list[dict]:
+            out: list[dict] = []
+            for opt in options:
+                is_active = abs(float(opt["value"]) - float(current)) < 1e-6
+                mark = "✅ " if is_active else ""
+                out.append({
+                    "text": f"{mark}{opt['label']}",
+                    "callback_data": f"{prefix}:{opt['value']}",
+                })
+            return out
+
+        return [
+            row("dex_pct", DEX_SPREAD_OPTIONS, cur_pct),
+            row("dex_vol", DEX_VOL_OPTIONS, cur_vol),
+            [
+                {
+                    "text": ("🛑 Turn off" if enabled else "✅ Turn on"),
+                    "callback_data": f"dex_toggle:{'off' if enabled else 'on'}",
+                },
+                {"text": "🔄 Refresh", "callback_data": "dex_refresh:1"},
+            ],
+        ]
+
+    def _dex_panel_text(self) -> str:
+        chain = self._get_filter_chain()
+        if chain is None:
+            return "❌ DEX filter chain not attached"
+
+        status_line = "🟢 ENABLED" if self._dex_is_enabled() else "🛑 DISABLED"
+        return (
+            "🧬 DEX Alert Settings\n\n"
+            f"Status:        {status_line}\n"
+            f"Min net spread:{self._dex_min_pct():>8g}%\n"
+            f"Min DEX vol:   ${self._dex_min_volume():,.0f}\n"
+            "Direction:     DEX -> futures only\n\n"
+            "Tap a button below, or use:\n"
+            "  /setdex <pct>\n"
+            "  /setdexvol <usd>\n"
+            "  /dexon  /dexoff"
+        )
+
+    async def _send_dex_panel(self, chat_id: str | None = None) -> None:
+        """Send the interactive DEX settings panel with inline buttons."""
+        cid = chat_id or self.chat_id
+        chain = self._get_filter_chain()
+        if chain is None:
+            await self._send_plain(cid, "❌ DEX filter chain not attached")
+            return
+
+        url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/sendMessage"
+        payload = {
+            "chat_id": cid,
+            "text": self._dex_panel_text(),
+            "reply_markup": {"inline_keyboard": self._build_dex_keyboard()},
+        }
+        try:
+            session = await self._get_session()
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.warning("dex_panel_failed", status=resp.status, body=body[:200])
+        except Exception:
+            logger.exception("dex_panel_error")
+
+    async def _handle_dex_callback(
+        self, data: str, callback: dict, callback_id: str, chat_id: str
+    ) -> None:
+        """Handle inline button presses from the DEX settings panel."""
+        chain = self._get_filter_chain()
+        if chain is None:
+            await self._answer_callback(callback_id, "DEX filter chain not attached")
+            return
+
+        from decimal import Decimal as _D
+
+        try:
+            key, raw = data.split(":", 1)
+        except ValueError:
+            await self._answer_callback(callback_id, "Bad data")
+            return
+
+        toast = ""
+        try:
+            if key == "dex_pct":
+                value = _D(raw)
+                chain.dex_min_net_spread_bps = value * _D("100")
+                toast = f"Min net: {float(value):g}%"
+            elif key == "dex_vol":
+                value = _D(raw)
+                chain.dex_min_volume_24h = value
+                toast = f"Min vol: ${float(value):,.0f}"
+            elif key == "dex_toggle":
+                chain.dex_enabled = raw == "on"
+                toast = "DEX alerts ON" if chain.dex_enabled else "DEX alerts OFF"
+            elif key == "dex_refresh":
+                toast = "Refreshed"
+            else:
+                await self._answer_callback(callback_id, "Unknown action")
+                return
+        except Exception:
+            logger.exception("dex_callback_error")
+            await self._answer_callback(callback_id, "Failed")
+            return
+
+        await self._answer_callback(callback_id, toast)
+
+        msg = callback.get("message", {})
+        msg_id = msg.get("message_id")
+        msg_chat_id = str(msg.get("chat", {}).get("id", chat_id))
+        if msg_id:
+            await self._edit_dex_panel(msg_chat_id, msg_id)
+
+    async def _edit_dex_panel(self, chat_id: str, message_id: int) -> None:
+        """Edit an existing DEX panel message in place with fresh state."""
+        url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/editMessageText"
+        payload = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": self._dex_panel_text(),
+            "reply_markup": {"inline_keyboard": self._build_dex_keyboard()},
+        }
+        try:
+            session = await self._get_session()
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.debug("dex_panel_edit_failed", status=resp.status, body=body[:200])
+        except Exception:
+            logger.exception("dex_panel_edit_error")
+
+    async def _handle_setdex(self, text: str, chat_id: str) -> None:
+        chain = self._get_filter_chain()
+        if chain is None:
+            await self._send_plain(chat_id, "❌ DEX filter chain not attached")
+            return
+        parts = text.split()
+        if len(parts) < 2:
+            await self._send_plain(chat_id, "Usage: /setdex 10  → 10% minimum net spread")
+            return
+        try:
+            from decimal import Decimal as _D
+            value = _D(parts[1])
+            if value <= 0 or value > 1000:
+                await self._send_plain(chat_id, "❌ Must be between 0 and 1000")
+                return
+            chain.dex_min_net_spread_bps = value * _D("100")
+            await self._send_plain(chat_id, f"✅ DEX min net spread set to {float(value):g}%")
+        except Exception:
+            await self._send_plain(chat_id, f"❌ Invalid number: {parts[1]}")
+
+    async def _handle_setdexvol(self, text: str, chat_id: str) -> None:
+        chain = self._get_filter_chain()
+        if chain is None:
+            await self._send_plain(chat_id, "❌ DEX filter chain not attached")
+            return
+        parts = text.split()
+        if len(parts) < 2:
+            await self._send_plain(chat_id, "Usage: /setdexvol 2000000  → $2M min 24h volume")
+            return
+        try:
+            from decimal import Decimal as _D
+            value = _D(parts[1])
+            if value < 0:
+                await self._send_plain(chat_id, "❌ Must be >= 0")
+                return
+            chain.dex_min_volume_24h = value
+            await self._send_plain(chat_id, f"✅ DEX min volume set to ${float(value):,.0f}")
+        except Exception:
+            await self._send_plain(chat_id, f"❌ Invalid number: {parts[1]}")
+
+    async def _handle_dex_toggle(self, chat_id: str, enable: bool) -> None:
+        chain = self._get_filter_chain()
+        if chain is None:
+            await self._send_plain(chat_id, "❌ DEX filter chain not attached")
+            return
+        chain.dex_enabled = enable
+        await self._send_plain(
+            chat_id,
+            "✅ DEX alerts ENABLED" if enable else "🛑 DEX alerts DISABLED"
+        )
 
     # ------------------------------------------------------------------
     # /pump commands
@@ -905,14 +1172,19 @@ class TelegramSender:
             cid,
             "🔔 Spread Scanner Bot\n\n"
             "Monitors cross-exchange spread opportunities on "
-            "Binance, Hyperliquid, and Gate.io perpetual futures.\n\n"
+            "Binance, Hyperliquid, and Gate.io perpetual futures, plus "
+            "DEX -> futures gaps from OKX DEX / Binance Alpha.\n\n"
             "Commands:\n"
             f"  /setmin <percent>  — Set minimum spread (current: {current:g}%)\n"
             "  /filter  — Show filter panel with buttons\n"
+            "  /dex     — Show DEX alert panel\n"
+            "  /setdex <percent>  — Set DEX min net spread\n"
+            "  /setdexvol <usd>   — Set DEX min 24h volume\n"
             "  /help    — Show this message\n\n"
             "Examples:\n"
             "  /setmin 3    — only alert if spread > 3%\n"
-            "  /setmin 0.5  — alert if spread > 0.5%\n"
+            "  /setdex 10   — DEX alerts only if net spread > 10%\n"
+            "  /setdexvol 2000000  — DEX alerts only if vol > $2M\n"
             "  /setmin 0    — show all alerts"
         )
 

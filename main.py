@@ -83,13 +83,17 @@ from exchange_adapters.bitget import BitgetAdapter
 from exchange_adapters.aster import AsterAdapter
 from exchange_adapters.lighter import LighterAdapter
 from exchange_adapters.mexc import MexcAdapter
+from exchange_adapters.binance_alpha import BinanceAlphaAdapter
+from exchange_adapters.okx_dex import OkxDexAdapter
 from symbol_mapper.exchange_symbols import LIGHTER_MARKET_INDEX_MAP
+from symbol_mapper.ticker_aliases import normalize_base
 from spread_engine.calculator import calculate_spread
 from filters.filter_chain import FilterChain
 from filters.market_cap_filter import MarketCapFilter
 from alerting.telegram import TelegramSender
 from models.snapshot import MarketSnapshot
 from pump_detector import PriceHistory, PumpDetector
+from utils.venues import is_dex_exchange
 
 logger = structlog.get_logger(__name__)
 
@@ -134,6 +138,8 @@ class SpreadScanner:
             "spreads_calculated": 0,       # spread calculations run
             "spreads_passed_filters": 0,   # passed filter chain
             "spreads_sent": 0,             # sent via telegram
+            "dex_spreads_sent": 0,         # sent DEX -> futures alerts
+            "dex_rejected_direction": 0,   # rejected invalid futures -> DEX routes
             "spreads_rejected_hard": 0,    # rejected by <1% hard check
             "spreads_rejected_filter": 0,  # rejected by filter chain
             "last_spread_alert_ts": None,  # datetime of last spread alert
@@ -147,12 +153,13 @@ class SpreadScanner:
         # Maps (exchange, canonical) -> list of (other_exchange, other_canonical)
         # to know which snapshots to compare for spreads.
         self._match_lookup: dict[tuple[str, str], list[tuple[str, str]]] = {}
+        self._futures_by_base: dict[str, list[tuple[str, str]]] = {}
 
         # Alert batching: accumulate routes per base token, flush after window.
-        # base_token -> list of SpreadOpportunity
-        self._alert_buffer: dict[str, list] = {}
-        # base_token -> asyncio.Task that will flush after BATCH_WINDOW_SECONDS
-        self._flush_tasks: dict[str, asyncio.Task] = {}
+        # (route_kind, base_token) -> list of SpreadOpportunity
+        self._alert_buffer: dict[tuple[str, str], list] = {}
+        # (route_kind, base_token) -> asyncio.Task that will flush after window
+        self._flush_tasks: dict[tuple[str, str], asyncio.Task] = {}
 
         # Deposit/withdrawal checker for alert enrichment
         self._deposit_checker = DepositChecker()
@@ -163,6 +170,9 @@ class SpreadScanner:
             min_gross_spread_bps=settings.filters.min_gross_spread_bps,
             max_gross_spread_bps=settings.filters.max_gross_spread_bps,
             min_net_spread_bps=settings.filters.min_net_spread_bps,
+            dex_enabled=settings.dex.enabled,
+            dex_min_net_spread_bps=settings.dex.min_net_spread_pct * Decimal("100"),
+            dex_min_volume_24h=settings.dex.min_volume_24h,
             min_bid_size=settings.filters.min_bid_size,
             min_ask_size=settings.filters.min_ask_size,
             min_volume_24h=settings.filters.min_volume_24h,
@@ -176,6 +186,9 @@ class SpreadScanner:
             min_gross_spread_bps=float(settings.filters.min_gross_spread_bps),
             max_gross_spread_bps=float(settings.filters.max_gross_spread_bps),
             min_net_spread_bps=float(settings.filters.min_net_spread_bps),
+            dex_enabled=settings.dex.enabled,
+            dex_min_net_spread_pct=float(settings.dex.min_net_spread_pct),
+            dex_min_volume_24h=float(settings.dex.min_volume_24h),
         )
         self._telegram = TelegramSender(
             bot_token=settings.telegram.bot_token,
@@ -209,6 +222,7 @@ class SpreadScanner:
         self._telegram.pump_detector = self._pump_detector  # type: ignore[attr-defined]
         self._telegram._pump_enabled_setter = self._set_pump_enabled  # type: ignore[attr-defined]
         self._telegram._pump_enabled_getter = lambda: self._pump_enabled  # type: ignore[attr-defined]
+        self._telegram.filter_chain = self._filter_chain  # type: ignore[attr-defined]
         self._telegram._scanner_diag = self._diag  # type: ignore[attr-defined]
         self._telegram._scanner_ref = self  # type: ignore[attr-defined]
 
@@ -224,6 +238,12 @@ class SpreadScanner:
     def _extract_base(self, canonical: str) -> str:
         """Extract base token from canonical symbol. 'POLYX-USDT-PERP' → 'POLYX'."""
         return canonical.split("-")[0] if "-" in canonical else canonical
+
+    def _route_kind(self, buy_exchange: str, sell_exchange: str) -> str:
+        """Classify an opportunity so DEX alerts batch separately from perp-perp."""
+        if is_dex_exchange(buy_exchange) or is_dex_exchange(sell_exchange):
+            return "dex"
+        return "perp"
 
     async def _on_snapshot(self, snapshot: MarketSnapshot) -> None:
         """
@@ -249,8 +269,14 @@ class SpreadScanner:
             return
         self._last_calc_time[key] = now
 
-        # Look up which (exchange, canonical) pairs we should compare against
-        counterparts = self._match_lookup.get(key, [])
+        # Futures snapshots compare against the mapper-derived futures graph.
+        # DEX snapshots compare only when the DEX poll is fresh, against all
+        # futures venues that list the same normalized base asset.
+        if is_dex_exchange(snapshot.exchange):
+            normalized_base = normalize_base(self._extract_base(snapshot.canonical_symbol))
+            counterparts = self._futures_by_base.get(normalized_base, [])
+        else:
+            counterparts = self._match_lookup.get(key, [])
 
         for other_key in counterparts:
             other_snap = self._snapshots.get(other_key)
@@ -264,6 +290,14 @@ class SpreadScanner:
             self._diag["spreads_calculated"] += len(opportunities)
 
             for opp in opportunities:
+                route_kind = self._route_kind(opp.buy_exchange, opp.sell_exchange)
+
+                # DEX spread alerts are actionable only in the direction
+                # buy-on-DEX, sell/short-on-futures.
+                if route_kind == "dex" and not is_dex_exchange(opp.buy_exchange):
+                    self._diag["dex_rejected_direction"] += 1
+                    continue
+
                 # HARD SAFETY CHECK — never send alerts below 1% net spread
                 # regardless of any other filter settings
                 net_pct = float(opp.net_spread_bps) / 100.0
@@ -283,36 +317,42 @@ class SpreadScanner:
 
                 # Buffer the route — will be flushed as a grouped alert
                 base = self._extract_base(opp.canonical_symbol)
-                self._alert_buffer.setdefault(base, []).append(opp)
+                alert_key = (route_kind, base)
+                self._alert_buffer.setdefault(alert_key, []).append(opp)
 
                 logger.info(
                     "route_buffered",
+                    route_kind=route_kind,
                     base=base,
                     symbol=opp.canonical_symbol,
                     buy=opp.buy_exchange,
                     sell=opp.sell_exchange,
                     net_pct=round(net_pct, 2),
-                    buffered_routes=len(self._alert_buffer[base]),
+                    buffered_routes=len(self._alert_buffer[alert_key]),
                 )
 
                 # Start a flush timer for this base token if not already running
-                if base not in self._flush_tasks or self._flush_tasks[base].done():
-                    self._flush_tasks[base] = asyncio.create_task(
-                        self._flush_after_delay(base)
+                if alert_key not in self._flush_tasks or self._flush_tasks[alert_key].done():
+                    self._flush_tasks[alert_key] = asyncio.create_task(
+                        self._flush_after_delay(alert_key)
                     )
 
-    async def _flush_after_delay(self, base: str) -> None:
+    async def _flush_after_delay(self, alert_key: tuple[str, str]) -> None:
         """
         Wait for the batch window, then send all buffered routes
         for this base token as one grouped Telegram alert.
         Enriches with deposit/withdrawal status and all exchange snapshots.
         """
+        route_kind, base = alert_key
         await asyncio.sleep(self.BATCH_WINDOW_SECONDS)
 
-        routes = self._alert_buffer.pop(base, [])
-        self._flush_tasks.pop(base, None)
+        routes = self._alert_buffer.pop(alert_key, [])
+        self._flush_tasks.pop(alert_key, None)
 
         if not routes:
+            return
+        if route_kind == "dex" and not self._filter_chain.dex_enabled:
+            logger.info("dex_flush_skipped", base=base, reason="disabled")
             return
 
         try:
@@ -344,6 +384,7 @@ class SpreadScanner:
 
             logger.info(
                 "flushing_grouped_alert",
+                route_kind=route_kind,
                 base=base,
                 route_count=len(routes),
                 exchanges_with_snapshots=len(all_snapshots),
@@ -357,11 +398,18 @@ class SpreadScanner:
             )
             if sent:
                 self._diag["spreads_sent"] += 1
+                if route_kind == "dex":
+                    self._diag["dex_spreads_sent"] += 1
                 self._diag["last_spread_alert_ts"] = datetime.now(timezone.utc)
                 self._diag["last_spread_symbol"] = base
         except Exception:
             self._diag["flush_errors"] += 1
-            logger.exception("flush_alert_error", base=base, route_count=len(routes))
+            logger.exception(
+                "flush_alert_error",
+                route_kind=route_kind,
+                base=base,
+                route_count=len(routes),
+            )
 
     async def _pump_check_loop(self) -> None:
         """Periodically scan price history and dispatch pump/dump alerts."""
@@ -557,6 +605,65 @@ class SpreadScanner:
                 symbol_count=len(native_symbols),
             )
 
+    def _build_dex_adapters(self) -> None:
+        """Create DEX polling adapters that compare on-chain prices vs futures."""
+        allowed_bases = set(self._futures_by_base.keys())
+        if not allowed_bases:
+            logger.warning("dex_adapters_skipped", reason="no futures bases available")
+            return
+
+        poll_interval = float(self.settings.dex.poll_interval_seconds)
+        stale_threshold = max(90.0, poll_interval * 3)
+
+        if self.settings.dex.binance_alpha_enabled:
+            adapter = BinanceAlphaAdapter(
+                allowed_bases=allowed_bases,
+                on_snapshot=self._on_snapshot,
+                poll_interval_seconds=poll_interval,
+                stale_threshold_seconds=stale_threshold,
+            )
+            self._adapters.append(adapter)
+            logger.info(
+                "adapter_created",
+                exchange="binance_alpha",
+                allowed_bases=len(allowed_bases),
+            )
+
+        if self.settings.dex.okx_enabled:
+            auth = self.settings.okx_auth
+            if not auth.api_key or not auth.api_secret or not auth.passphrase:
+                logger.warning(
+                    "okx_dex_skipped",
+                    reason="missing OKX_API_KEY / OKX_API_SECRET / OKX_PASSPHRASE",
+                )
+            else:
+                chain_indices = [
+                    item.strip()
+                    for item in self.settings.dex.okx_chain_indices.split(",")
+                    if item.strip()
+                ]
+                if not chain_indices:
+                    logger.warning("okx_dex_skipped", reason="no DEX_OKX_CHAIN_INDICES configured")
+                    return
+                adapter = OkxDexAdapter(
+                    allowed_bases=allowed_bases,
+                    chain_indices=chain_indices,
+                    api_key=auth.api_key,
+                    api_secret=auth.api_secret,
+                    passphrase=auth.passphrase,
+                    project_id=auth.project_id,
+                    on_snapshot=self._on_snapshot,
+                    poll_interval_seconds=poll_interval,
+                    stale_threshold_seconds=stale_threshold,
+                )
+                self._adapters.append(adapter)
+                logger.info(
+                    "adapter_created",
+                    exchange="okx_dex",
+                    chains=chain_indices,
+                    allowed_bases=len(allowed_bases),
+                )
+
     async def start(self) -> None:
         """Bootstrap and run the scanner."""
         self._running = True
@@ -576,6 +683,15 @@ class SpreadScanner:
             self._match_lookup.setdefault(key_a, []).append(key_b)
             self._match_lookup.setdefault(key_b, []).append(key_a)
 
+        # Futures base lookup used by DEX snapshots. We normalize bases here so
+        # aliases like 1000CHEEMS and CHEEMS collapse to one comparison bucket.
+        self._futures_by_base.clear()
+        for exchange in self.settings.enabled_exchanges:
+            for canonical in self._mapper.get_exchange_symbols(exchange):
+                normalized_base = normalize_base(self._extract_base(canonical))
+                key = (exchange, canonical)
+                self._futures_by_base.setdefault(normalized_base, []).append(key)
+
         logger.info(
             "matchable_symbols",
             total=len(matchable),
@@ -584,6 +700,7 @@ class SpreadScanner:
 
         # Step 2: Build adapters (only subscribe to symbols in matchable pairs)
         self._build_adapters()
+        self._build_dex_adapters()
 
         if not self._adapters:
             raise RuntimeError("no adapters created from bootstrap results")

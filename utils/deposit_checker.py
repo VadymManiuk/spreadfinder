@@ -7,25 +7,21 @@ Assumptions:
   - Binance, Gate, Bitget have public (no API key) endpoints.
   - Bybit: deposit status from public allowed-deposit-list; withdraw unknown.
   - OKX: authenticated API (read-only key) for full deposit/withdraw status.
-  - DEXes (Hyperliquid, Aster, Lighter) are always available (bridge-based).
+  - DEXes / on-chain venues are treated as always available (bridge-based).
   - Refreshed every 5 minutes to catch chain suspensions.
 """
 
 import asyncio
-import base64
-import hashlib
-import hmac
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
 
 import aiohttp
 import structlog
 
-logger = structlog.get_logger(__name__)
+from utils.okx_auth import okx_headers
+from utils.venues import is_dex_exchange
 
-# DEXes — deposits/withdrawals are always available (on-chain bridging)
-DEX_EXCHANGES = {"hyperliquid", "aster", "lighter"}
+logger = structlog.get_logger(__name__)
 
 # Refresh interval for deposit/withdrawal status
 REFRESH_INTERVAL_SECONDS = 300  # 5 minutes
@@ -101,7 +97,7 @@ class DepositChecker:
 
     def get_status(self, exchange: str, base: str) -> CoinStatus:
         """Get deposit/withdrawal status for a token on an exchange."""
-        if exchange in DEX_EXCHANGES:
+        if is_dex_exchange(exchange) or exchange in {"hyperliquid", "aster", "lighter"}:
             return AVAILABLE
         return self._status.get((exchange, base.upper()), UNKNOWN)
 
@@ -267,19 +263,6 @@ class DepositChecker:
     # OKX — authenticated API (read-only key)
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _okx_sign(timestamp: str, method: str, path: str, secret: str) -> str:
-        """
-        OKX API signature: HMAC-SHA256 of (timestamp + method + path), base64 encoded.
-        """
-        message = timestamp + method + path
-        mac = hmac.new(
-            secret.encode("utf-8"),
-            message.encode("utf-8"),
-            hashlib.sha256,
-        )
-        return base64.b64encode(mac.digest()).decode("utf-8")
-
     async def _fetch_okx(self, session: aiohttp.ClientSession) -> None:
         """
         OKX authenticated API: GET /api/v5/asset/currencies
@@ -295,22 +278,14 @@ class DepositChecker:
             logger.debug("okx_deposit_skipped", reason="no API credentials")
             return
 
-        # Build signature — timestamp MUST be generated right before the request
-        # to avoid clock drift rejection
-        method = "GET"
         path = "/api/v5/asset/currencies"
-        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
-        sign = self._okx_sign(timestamp, method, path, api_secret)
-
-        headers = {
-            "OK-ACCESS-KEY": api_key,
-            "OK-ACCESS-SIGN": sign,
-            "OK-ACCESS-TIMESTAMP": timestamp,
-            "OK-ACCESS-PASSPHRASE": passphrase,
-            "Content-Type": "application/json",
-            "User-Agent": "python-aiohttp/3.9",
-        }
-
+        headers = okx_headers(
+            api_key=api_key,
+            api_secret=api_secret,
+            passphrase=passphrase,
+            method="GET",
+            request_path=path,
+        )
         url = f"https://www.okx.com{path}"
         async with session.get(url, headers=headers) as resp:
             resp.raise_for_status()

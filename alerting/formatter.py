@@ -16,6 +16,7 @@ from decimal import Decimal
 from models.snapshot import MarketSnapshot, SpreadOpportunity
 from pump_detector.models import PumpAlert
 from utils.exchange_links import futures_url, supported_exchanges
+from utils.venues import display_exchange, is_dex_exchange
 
 # Characters that must be escaped in MarkdownV2
 # https://core.telegram.org/bots/api#markdownv2-style
@@ -169,8 +170,8 @@ def format_alert(opp: SpreadOpportunity) -> str:
     Format a single SpreadOpportunity into a Telegram MarkdownV2 message.
     """
     symbol = _e(opp.canonical_symbol)
-    buy_ex = _e(opp.buy_exchange.upper())
-    sell_ex = _e(opp.sell_exchange.upper())
+    buy_ex = _e(display_exchange(opp.buy_exchange).upper())
+    sell_ex = _e(display_exchange(opp.sell_exchange).upper())
 
     buy_ask = _e(_fmt_decimal(opp.buy_ask))
     sell_bid = _e(_fmt_decimal(opp.sell_bid))
@@ -268,7 +269,7 @@ def format_grouped_alert(
     # ── HEADER ──────────────────────────────────────────────────────────
     lines = [
         f"🔔 *{_e(base)}  {_e(f'{best_net_pct:.2f}%')}  "
-        f"{_e(best.buy_exchange)} → {_e(best.sell_exchange)}*",
+        f"{_e(display_exchange(best.buy_exchange))} → {_e(display_exchange(best.sell_exchange))}*",
     ]
 
     # ── FUNDING COUNTDOWN PER EXCHANGE ──────────────────────────────────
@@ -281,25 +282,30 @@ def format_grouped_alert(
 
     funding_parts = []
     for ex in sorted(all_ex_set):
+        if is_dex_exchange(ex):
+            continue
         snap = all_snapshots.get(ex) if all_snapshots else None
         mins = _next_funding_minutes(ex, snap)
-        funding_parts.append(f"{ex}:{_fmt_minutes(mins)}")
-    lines.append(f"⏰ {_e(' | '.join(funding_parts))}")
-    lines.append("")
+        funding_parts.append(f"{display_exchange(ex)}:{_fmt_minutes(mins)}")
+    if funding_parts:
+        lines.append(f"⏰ {_e(' | '.join(funding_parts))}")
+        lines.append("")
 
     # ── BEST ROUTE (code block) ─────────────────────────────────────────
     buy_price = f"{float(best.buy_ask):.{prec}f}"
     sell_price = f"{float(best.sell_bid):.{prec}f}"
     buy_vol = _fmt_vol(best.buy_volume_24h)
     sell_vol = _fmt_vol(best.sell_volume_24h)
-    buy_fund = _fmt_funding_short(best.buy_funding_rate)
-    sell_fund = _fmt_funding_short(best.sell_funding_rate)
+    buy_fund = "spot" if is_dex_exchange(best.buy_exchange) else _fmt_funding_short(best.buy_funding_rate)
+    sell_fund = "spot" if is_dex_exchange(best.sell_exchange) else _fmt_funding_short(best.sell_funding_rate)
+    buy_label = display_exchange(best.buy_exchange)
+    sell_label = display_exchange(best.sell_exchange)
 
-    ex_w = max(len(best.buy_exchange), len(best.sell_exchange))
+    ex_w = max(len(buy_label), len(sell_label))
 
     best_table = (
-        f"LONG  {best.buy_exchange:<{ex_w}}  {buy_price}  {buy_vol:<7} {buy_fund}\n"
-        f"SHORT {best.sell_exchange:<{ex_w}}  {sell_price}  {sell_vol:<7} {sell_fund}"
+        f"LONG  {buy_label:<{ex_w}}  {buy_price}  {buy_vol:<7} {buy_fund}\n"
+        f"SHORT {sell_label:<{ex_w}}  {sell_price}  {sell_vol:<7} {sell_fund}"
     )
 
     buy_dw = _dw_symbols(deposit_status, best.buy_exchange, base)
@@ -308,7 +314,7 @@ def format_grouped_alert(
     lines.append(f"📍 *Best route:*")
     lines.append(f"```\n{best_table}\n```")
     lines.append(
-        f"DW: {_e(best.buy_exchange)} {buy_dw} \\| {_e(best.sell_exchange)} {sell_dw}"
+        f"DW: {_e(buy_label)} {buy_dw} \\| {_e(sell_label)} {sell_dw}"
     )
     lines.append("")
 
@@ -320,7 +326,7 @@ def format_grouped_alert(
 
     if exchange_rows:
         # Calculate column widths for alignment
-        col_ex = max(max(len(r["ex"]) for r in exchange_rows), 2)
+        col_ex = max(max(len(r["label"]) for r in exchange_rows), 2)
         col_price = max(max(len(r["price"]) for r in exchange_rows), 5)
         col_vol = max(max(len(r["vol"]) for r in exchange_rows), 3)
         col_sprd = max(max(len(r["spread"]) for r in exchange_rows), 4)
@@ -337,7 +343,7 @@ def format_grouped_alert(
 
         for r in exchange_rows:
             row = (
-                f"{r['ex']:<{col_ex}}  {r['price']:>{col_price}}  "
+                f"{r['label']:<{col_ex}}  {r['price']:>{col_price}}  "
                 f"{r['vol']:>{col_vol}}  {r['spread']:>{col_sprd}}  "
                 f"{r['fund']:>{col_fund}}  {r['tfund']:>{col_tf}}"
             )
@@ -349,7 +355,7 @@ def format_grouped_alert(
         dw_parts = []
         for r in exchange_rows:
             dw = _dw_symbols(deposit_status, r["ex"], base)
-            dw_parts.append(f"{_e(r['ex'])} {dw}")
+            dw_parts.append(f"{_e(r['label'])} {dw}")
 
         lines.append(f"📊 *All exchanges:*")
         lines.append(f"```\n{table_str}\n```")
@@ -369,7 +375,7 @@ def format_grouped_alert(
             net = float(opp.net_spread_bps) / 100
             lines.append(
                 f"  \\#{_e(str(i))} "
-                f"{_e(opp.buy_exchange)}→{_e(opp.sell_exchange)} "
+                f"{_e(display_exchange(opp.buy_exchange))}→{_e(display_exchange(opp.sell_exchange))} "
                 f"*{_e(f'{net:.2f}%')}*"
             )
         lines.append("")
@@ -422,7 +428,7 @@ def _build_links_line(base: str, priority: list[str] | None = None) -> str | Non
     has_link = False
     for ex in ordered:
         url = futures_url(ex, base)
-        name_escaped = _e(ex)
+        name_escaped = _e(display_exchange(ex))
         if url:
             # MarkdownV2 link: [text](url). The URL must also have its
             # special chars escaped per Telegram docs (only `)` and `\`).
@@ -578,8 +584,8 @@ def _build_exchange_rows(
                 price_f = float(snap.ask)
             price_str = f"{price_f:.{prec}f}"
             vol_str = _fmt_vol(snap.volume_24h)
-            fund_str = _fmt_funding_short(snap.funding_rate)
-            tfund_str = _fmt_minutes(_next_funding_minutes(ex, snap))
+            fund_str = "spot" if is_dex_exchange(ex) else _fmt_funding_short(snap.funding_rate)
+            tfund_str = "—" if is_dex_exchange(ex) else _fmt_minutes(_next_funding_minutes(ex, snap))
 
             if ex == sell_ex:
                 spread_str = "sell"
@@ -594,6 +600,7 @@ def _build_exchange_rows(
 
             rows.append({
                 "ex": ex,
+                "label": display_exchange(ex),
                 "price": price_str,
                 "vol": vol_str,
                 "spread": spread_str,
@@ -622,8 +629,8 @@ def _build_exchange_rows(
 
                 price_str = f"{price_f:.{prec}f}"
                 vol_str = _fmt_vol(vol)
-                fund_str = _fmt_funding_short(fund)
-                tfund_str = _fmt_minutes(_next_funding_minutes(ex))
+                fund_str = "spot" if is_dex_exchange(ex) else _fmt_funding_short(fund)
+                tfund_str = "—" if is_dex_exchange(ex) else _fmt_minutes(_next_funding_minutes(ex))
 
                 if ex == sell_ex:
                     spread_str = "sell"
@@ -638,6 +645,7 @@ def _build_exchange_rows(
 
                 rows.append({
                     "ex": ex,
+                    "label": display_exchange(ex),
                     "price": price_str,
                     "vol": vol_str,
                     "spread": spread_str,
