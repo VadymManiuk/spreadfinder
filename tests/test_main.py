@@ -2,14 +2,23 @@
 Tests for scanner startup health checks.
 """
 
+from datetime import datetime, timezone
+from decimal import Decimal
+
 import pytest
 
 from config.settings import PumpTelegramSettings, Settings, TelegramSettings
 from main import SpreadScanner
+from pump_detector.models import PumpAlert
 
 
 def _make_scanner(exchanges: list[str]) -> SpreadScanner:
-    return SpreadScanner(Settings(enabled_exchanges=exchanges))
+    return SpreadScanner(
+        Settings(
+            enabled_exchanges=exchanges,
+            pump_telegram=PumpTelegramSettings(bot_token="", chat_id=""),
+        )
+    )
 
 
 def test_bootstrap_health_rejects_heavily_degraded_startup():
@@ -69,6 +78,7 @@ def test_pump_alerts_use_main_sender_by_default():
         Settings(
             enabled_exchanges=["binance"],
             telegram=TelegramSettings(bot_token="main-token", chat_id="main-chat"),
+            pump_telegram=PumpTelegramSettings(bot_token="", chat_id=""),
         )
     )
 
@@ -107,3 +117,38 @@ def test_pump_alerts_fall_back_to_main_chat_id_for_secondary_bot():
 
     assert scanner._pump_telegram is not None
     assert scanner._pump_telegram.chat_id == "main-chat"
+
+
+@pytest.mark.asyncio
+async def test_pump_alert_send_falls_back_to_main_sender_on_secondary_failure():
+    scanner = SpreadScanner(Settings(enabled_exchanges=["binance"]))
+
+    class StubSender:
+        def __init__(self, result: bool):
+            self.result = result
+            self.calls = 0
+
+        async def send_pump_alert(self, alert: PumpAlert) -> bool:
+            self.calls += 1
+            return self.result
+
+    scanner._telegram = StubSender(True)
+    scanner._pump_telegram = StubSender(False)
+
+    alert = PumpAlert(
+        base="ARIA",
+        direction="pump",
+        start_price=Decimal("1.0"),
+        current_price=Decimal("1.2"),
+        change_pct=Decimal("20.0"),
+        window_seconds=300,
+        start_ts=datetime.now(timezone.utc),
+        current_ts=datetime.now(timezone.utc),
+        triggered_on="binance",
+    )
+
+    sent = await scanner._send_pump_alert(alert)
+
+    assert sent is True
+    assert scanner._pump_telegram.calls == 1
+    assert scanner._telegram.calls == 1

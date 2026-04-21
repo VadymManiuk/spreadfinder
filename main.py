@@ -259,6 +259,21 @@ class SpreadScanner:
         """Return the active Telegram sender for pump/dump alerts."""
         return self._pump_telegram or self._telegram
 
+    async def _send_pump_alert(self, alert) -> bool:
+        """
+        Send a pump/dump alert, falling back to the main bot if needed.
+
+        This keeps alerts flowing while a newly configured secondary bot is not
+        yet started by the user or has no permission to write to the target chat.
+        """
+        sender = self._pump_sender()
+        sent = await sender.send_pump_alert(alert)
+        if sent or self._pump_telegram is None or sender is self._telegram:
+            return sent
+
+        logger.warning("pump_telegram_send_failed_fallback_main")
+        return await self._telegram.send_pump_alert(alert)
+
     def _set_pump_enabled(self, enabled: bool) -> None:
         """Toggle pump alerts at runtime (called from /pumpon, /pumpoff)."""
         was = self._pump_enabled
@@ -467,7 +482,7 @@ class SpreadScanner:
                         window_s=alert.window_seconds,
                         triggered_on=alert.triggered_on,
                     )
-                    sent = await self._pump_sender().send_pump_alert(alert)
+                    sent = await self._send_pump_alert(alert)
                     if sent:
                         self._diag["pumps_sent"] += 1
                         self._diag["last_pump_ts"] = datetime.now(timezone.utc)
