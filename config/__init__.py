@@ -1,3 +1,17 @@
-from config.settings import Settings, TelegramSettings, FilterSettings, ExchangeFees, AdapterSettings
+from config.settings import (
+    AdapterSettings,
+    ExchangeFees,
+    FilterSettings,
+    PumpTelegramSettings,
+    Settings,
+    TelegramSettings,
+)
 
-__all__ = ["Settings", "TelegramSettings", "FilterSettings", "ExchangeFees", "AdapterSettings"]
+__all__ = [
+    "Settings",
+    "TelegramSettings",
+    "PumpTelegramSettings",
+    "FilterSettings",
+    "ExchangeFees",
+    "AdapterSettings",
+]

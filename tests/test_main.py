@@ -4,7 +4,7 @@ Tests for scanner startup health checks.
 
 import pytest
 
-from config.settings import Settings
+from config.settings import PumpTelegramSettings, Settings, TelegramSettings
 from main import SpreadScanner
 
 
@@ -62,3 +62,48 @@ def test_bootstrap_health_allows_majority_of_exchanges_ready():
         scanner._mapper._bootstrap_errors[exchange] = "dns failure"
 
     scanner._validate_bootstrap_health()
+
+
+def test_pump_alerts_use_main_sender_by_default():
+    scanner = SpreadScanner(
+        Settings(
+            enabled_exchanges=["binance"],
+            telegram=TelegramSettings(bot_token="main-token", chat_id="main-chat"),
+        )
+    )
+
+    assert scanner._pump_sender() is scanner._telegram
+
+
+def test_pump_alerts_use_secondary_bot_when_configured():
+    scanner = SpreadScanner(
+        Settings(
+            enabled_exchanges=["binance"],
+            telegram=TelegramSettings(bot_token="main-token", chat_id="main-chat"),
+            pump_telegram=PumpTelegramSettings(
+                bot_token="pump-token",
+                chat_id="pump-chat",
+            ),
+        )
+    )
+
+    assert scanner._pump_telegram is not None
+    assert scanner._pump_sender() is scanner._pump_telegram
+    assert scanner._pump_telegram.bot_token == "pump-token"
+    assert scanner._pump_telegram.chat_id == "pump-chat"
+
+
+def test_pump_alerts_fall_back_to_main_chat_id_for_secondary_bot():
+    scanner = SpreadScanner(
+        Settings(
+            enabled_exchanges=["binance"],
+            telegram=TelegramSettings(bot_token="main-token", chat_id="main-chat"),
+            pump_telegram=PumpTelegramSettings(
+                bot_token="pump-token",
+                chat_id="",
+            ),
+        )
+    )
+
+    assert scanner._pump_telegram is not None
+    assert scanner._pump_telegram.chat_id == "main-chat"

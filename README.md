@@ -115,6 +115,20 @@ All settings are in `.env`. See `.env.example` for the full list with defaults.
 | `MAX_DATA_AGE_MS` | 2000 | Maximum acceptable data staleness |
 | `MIN_CONFIDENCE` | 0.3 | Minimum confidence score (0.0–1.0) |
 
+### Dedicated Pump/Dump Bot
+
+Pump and dump alerts can be sent through a separate Telegram bot while keeping
+spread/DEX controls on the main bot.
+
+```bash
+PUMP_TELEGRAM_BOT_TOKEN=...
+PUMP_TELEGRAM_CHAT_ID=...
+```
+
+If `PUMP_TELEGRAM_CHAT_ID` is left empty, the scanner falls back to
+`TELEGRAM_CHAT_ID`. The secondary bot is send-only: `/pump` controls and the
+interactive panels stay on the main bot.
+
 ### DEX Alert Settings
 
 | Setting | Default | Description |

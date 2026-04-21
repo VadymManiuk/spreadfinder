@@ -102,9 +102,13 @@ class TelegramSender:
         bot_token: str | None = None,
         chat_id: str | None = None,
         session: aiohttp.ClientSession | None = None,
+        allow_default_env: bool = True,
     ):
-        self.bot_token = bot_token or os.getenv("TELEGRAM_BOT_TOKEN", "")
-        self.chat_id = chat_id or os.getenv("TELEGRAM_CHAT_ID", "")
+        default_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "") if allow_default_env else ""
+        default_chat_id = os.getenv("TELEGRAM_CHAT_ID", "") if allow_default_env else ""
+
+        self.bot_token = bot_token or default_bot_token
+        self.chat_id = chat_id or default_chat_id
         self._session = session
         self._own_session = session is None
         self._last_send_time: float = 0
@@ -126,6 +130,10 @@ class TelegramSender:
 
     def _is_configured(self) -> bool:
         return bool(self.bot_token) and bool(self.chat_id)
+
+    def is_configured(self) -> bool:
+        """Public configuration check for routing decisions outside this module."""
+        return self._is_configured()
 
     # ------------------------------------------------------------------
     # Filter settings (all in % now, not bps)

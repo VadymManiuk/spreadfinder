@@ -32,6 +32,19 @@ class TelegramSettings(BaseSettings):
     chat_id: str = ""
 
 
+class PumpTelegramSettings(BaseSettings):
+    """
+    Dedicated Telegram destination for pump/dump alerts.
+
+    If `chat_id` is left empty, the scanner falls back to `TELEGRAM_CHAT_ID`.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="PUMP_TELEGRAM_", **_ENV_FILE_CONFIG)
+
+    bot_token: str = ""
+    chat_id: str = ""
+
+
 class FilterSettings(BaseSettings):
     """Spread opportunity filter thresholds."""
 
@@ -211,6 +224,7 @@ class Settings(BaseSettings):
 
     # Sub-settings
     telegram: TelegramSettings = Field(default_factory=TelegramSettings)
+    pump_telegram: PumpTelegramSettings = Field(default_factory=PumpTelegramSettings)
     filters: FilterSettings = Field(default_factory=FilterSettings)
     fees: ExchangeFees = Field(default_factory=ExchangeFees)
     adapter: AdapterSettings = Field(default_factory=AdapterSettings)

@@ -194,6 +194,7 @@ class SpreadScanner:
             bot_token=settings.telegram.bot_token,
             chat_id=settings.telegram.chat_id,
         )
+        self._pump_telegram = self._build_pump_telegram_sender()
         self._adapters: list = []
 
         # Pump/dump detector
@@ -225,6 +226,38 @@ class SpreadScanner:
         self._telegram.filter_chain = self._filter_chain  # type: ignore[attr-defined]
         self._telegram._scanner_diag = self._diag  # type: ignore[attr-defined]
         self._telegram._scanner_ref = self  # type: ignore[attr-defined]
+
+    def _build_pump_telegram_sender(self) -> TelegramSender | None:
+        """
+        Create a dedicated pump/dump Telegram sender when configured.
+
+        The secondary bot is send-only: polling and interactive controls stay on
+        the main bot to avoid split runtime state.
+        """
+        bot_token = self.settings.pump_telegram.bot_token
+        if not bot_token:
+            return None
+
+        chat_id = self.settings.pump_telegram.chat_id or self.settings.telegram.chat_id
+        sender = TelegramSender(
+            bot_token=bot_token,
+            chat_id=chat_id,
+            allow_default_env=False,
+        )
+        if sender.is_configured():
+            logger.info("pump_telegram_sender_configured", chat_id=chat_id)
+            return sender
+
+        logger.warning(
+            "pump_telegram_sender_incomplete",
+            has_bot_token=bool(bot_token),
+            has_chat_id=bool(chat_id),
+        )
+        return None
+
+    def _pump_sender(self) -> TelegramSender:
+        """Return the active Telegram sender for pump/dump alerts."""
+        return self._pump_telegram or self._telegram
 
     def _set_pump_enabled(self, enabled: bool) -> None:
         """Toggle pump alerts at runtime (called from /pumpon, /pumpoff)."""
@@ -434,7 +467,7 @@ class SpreadScanner:
                         window_s=alert.window_seconds,
                         triggered_on=alert.triggered_on,
                     )
-                    sent = await self._telegram.send_pump_alert(alert)
+                    sent = await self._pump_sender().send_pump_alert(alert)
                     if sent:
                         self._diag["pumps_sent"] += 1
                         self._diag["last_pump_ts"] = datetime.now(timezone.utc)
@@ -761,6 +794,8 @@ class SpreadScanner:
             logger.exception("mcap_filter_stop_error")
 
         await self._deposit_checker.stop()
+        if self._pump_telegram is not None:
+            await self._pump_telegram.close()
         await self._telegram.close()
         logger.info("scanner_stopped")
 
