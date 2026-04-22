@@ -129,6 +129,11 @@ If `PUMP_TELEGRAM_CHAT_ID` is left empty, the scanner falls back to
 `TELEGRAM_CHAT_ID`. The secondary bot is send-only: `/pump` controls and the
 interactive panels stay on the main bot.
 
+Pump/dump detection uses futures reference prices (`mark_price`, fallback
+`index_price`) instead of raw order-book mid, and ignores DEX aggregator
+sources like Binance Alpha / OKX DEX as standalone triggers. This avoids false
+alerts from thin books or noisy spot aggregator quotes.
+
 ### DEX Alert Settings
 
 | Setting | Default | Description |

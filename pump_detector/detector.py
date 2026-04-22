@@ -17,7 +17,7 @@ import structlog
 
 from filters.market_cap_filter import MarketCapFilter
 from pump_detector.models import PumpAlert
-from pump_detector.price_history import PriceHistory
+from pump_detector.price_history import PriceHistory, price_reference
 
 logger = structlog.get_logger(__name__)
 
@@ -152,12 +152,15 @@ class PumpDetector:
             return None
         self._last_alert[cooldown_key] = now
 
-        # Build per-exchange price/volume tables for the alert
+        # Build per-exchange price/volume tables for the alert using the same
+        # reference price source as the detector itself.
         exchange_prices: dict[str, Decimal] = {}
         exchange_volumes: dict[str, Decimal | None] = {}
         for ex_name, snap in latest_snaps.items():
-            mid = (snap.bid + snap.ask) / 2
-            exchange_prices[ex_name] = mid
+            ref_price = price_reference(snap)
+            if ref_price is None:
+                continue
+            exchange_prices[ex_name] = ref_price
             exchange_volumes[ex_name] = snap.volume_24h
 
         return PumpAlert(
