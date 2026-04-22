@@ -9,3 +9,4 @@ build/
 .claude/
 .bot.pid
 .chat_filters.json
+.telegram_ui_state.json

@@ -103,6 +103,7 @@ class TelegramSender:
         chat_id: str | None = None,
         session: aiohttp.ClientSession | None = None,
         allow_default_env: bool = True,
+        ui_state_file: str | None = None,
     ):
         default_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "") if allow_default_env else ""
         default_chat_id = os.getenv("TELEGRAM_CHAT_ID", "") if allow_default_env else ""
@@ -121,7 +122,12 @@ class TelegramSender:
         self._chat_filters: dict[str, float] = {}
         self._default_min_pct: float = 1.0
         self._filter_file = os.path.join(os.path.dirname(__file__), "..", ".chat_filters.json")
+        self._ui_state_file = ui_state_file or os.path.join(
+            os.path.dirname(__file__), "..", ".telegram_ui_state.json"
+        )
+        self._startup_message_sent_chat_ids: set[str] = set()
         self._load_filters()
+        self._load_ui_state()
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None:
@@ -168,6 +174,50 @@ class TelegramSender:
                 json.dump(self._chat_filters, f)
         except Exception:
             logger.exception("filter_save_error")
+
+    def _load_ui_state(self) -> None:
+        """Load Telegram UI state that should survive process restarts."""
+        try:
+            if os.path.exists(self._ui_state_file):
+                with open(self._ui_state_file, "r") as f:
+                    data = json.load(f)
+                chat_ids = data.get("startup_message_sent_chat_ids", [])
+                if isinstance(chat_ids, list):
+                    self._startup_message_sent_chat_ids = {
+                        str(chat_id) for chat_id in chat_ids if str(chat_id)
+                    }
+                logger.info(
+                    "telegram_ui_state_loaded",
+                    startup_message_chats=sorted(self._startup_message_sent_chat_ids),
+                )
+        except Exception:
+            logger.exception("telegram_ui_state_load_error")
+
+    def _save_ui_state(self) -> None:
+        """Persist Telegram UI state so startup UX is not resent on every restart."""
+        try:
+            with open(self._ui_state_file, "w") as f:
+                json.dump(
+                    {
+                        "startup_message_sent_chat_ids": sorted(
+                            self._startup_message_sent_chat_ids
+                        )
+                    },
+                    f,
+                )
+        except Exception:
+            logger.exception("telegram_ui_state_save_error")
+
+    def _has_sent_startup_message(self, chat_id: str) -> bool:
+        """Return whether the startup menu was already delivered to this chat."""
+        return chat_id in self._startup_message_sent_chat_ids
+
+    def _mark_startup_message_sent(self, chat_id: str) -> None:
+        """Record a successful startup-menu delivery for this chat."""
+        if not chat_id or chat_id in self._startup_message_sent_chat_ids:
+            return
+        self._startup_message_sent_chat_ids.add(chat_id)
+        self._save_ui_state()
 
     def passes_filter(self, opp: SpreadOpportunity, chat_id: str | None = None) -> bool:
         """Check if an opportunity passes the chat's spread filter."""
@@ -302,7 +352,7 @@ class TelegramSender:
                 logger.exception("telegram_send_error")
                 return False
 
-    async def _send_plain(self, chat_id: str, text: str, with_menu: bool = True) -> None:
+    async def _send_plain(self, chat_id: str, text: str, with_menu: bool = True) -> bool:
         """Send a plain text message with persistent bottom keyboard."""
         url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/sendMessage"
         payload: dict = {"chat_id": chat_id, "text": text}
@@ -314,18 +364,27 @@ class TelegramSender:
                 if resp.status != 200:
                     body = await resp.text()
                     logger.warning("plain_send_failed", status=resp.status, body=body[:200])
+                    return False
+                return True
         except Exception:
             logger.exception("plain_send_error")
+            return False
 
     async def _send_bottom_menu(self) -> None:
         """Send a greeting with the persistent bottom keyboard on startup."""
+        if self._has_sent_startup_message(self.chat_id):
+            logger.info("startup_message_skipped", chat_id=self.chat_id, reason="already_sent")
+            return
+
         current = self.get_min_spread_pct()
-        await self._send_plain(
+        sent = await self._send_plain(
             self.chat_id,
             f"🟢 Bot started\n"
             f"Filter: > {current:g}% net spread\n\n"
             f"Use the buttons below to manage settings."
         )
+        if sent:
+            self._mark_startup_message_sent(self.chat_id)
 
     async def _send_status(self, chat_id: str | None = None) -> None:
         """Send comprehensive bot status with diagnostics."""
