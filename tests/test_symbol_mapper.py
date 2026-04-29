@@ -12,6 +12,16 @@ from symbol_mapper.exchange_symbols import (
     binance_canonical_to_native,
     binance_spot_native_to_canonical,
     binance_spot_canonical_to_native,
+    gate_spot_native_to_canonical,
+    gate_spot_canonical_to_native,
+    bybit_spot_native_to_canonical,
+    bybit_spot_canonical_to_native,
+    okx_spot_native_to_canonical,
+    okx_spot_canonical_to_native,
+    bitget_spot_native_to_canonical,
+    bitget_spot_canonical_to_native,
+    mexc_spot_native_to_canonical,
+    mexc_spot_canonical_to_native,
     hyperliquid_native_to_canonical,
     hyperliquid_canonical_to_native,
     gate_native_to_canonical,
@@ -71,6 +81,34 @@ class TestBinanceSpotConversion:
     def test_canonical_to_native_invalid(self):
         assert binance_spot_canonical_to_native("BTC-USDT-PERP") is None
         assert binance_spot_canonical_to_native("BTC-USDT") is None
+
+
+class TestOtherSpotConversions:
+
+    def test_gate_spot_round_trip(self):
+        canonical = gate_spot_native_to_canonical("AI_USDT")
+        assert canonical == "AI-USDT-SPOT"
+        assert gate_spot_canonical_to_native(canonical) == "AI_USDT"
+
+    def test_bybit_spot_round_trip(self):
+        canonical = bybit_spot_native_to_canonical("AIUSDT")
+        assert canonical == "AI-USDT-SPOT"
+        assert bybit_spot_canonical_to_native(canonical) == "AIUSDT"
+
+    def test_okx_spot_round_trip(self):
+        canonical = okx_spot_native_to_canonical("AI-USDT")
+        assert canonical == "AI-USDT-SPOT"
+        assert okx_spot_canonical_to_native(canonical) == "AI-USDT"
+
+    def test_bitget_spot_round_trip(self):
+        canonical = bitget_spot_native_to_canonical("AIUSDT")
+        assert canonical == "AI-USDT-SPOT"
+        assert bitget_spot_canonical_to_native(canonical) == "AIUSDT"
+
+    def test_mexc_spot_round_trip(self):
+        canonical = mexc_spot_native_to_canonical("AIUSDT")
+        assert canonical == "AI-USDT-SPOT"
+        assert mexc_spot_canonical_to_native(canonical) == "AIUSDT"
 
 
 # ---------------------------------------------------------------------------

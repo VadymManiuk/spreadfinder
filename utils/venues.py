@@ -17,12 +17,22 @@ DEX_EXCHANGE_FAMILIES = {
 
 SPOT_EXCHANGE_FAMILIES = {
     "binance_spot",
+    "gate_spot",
+    "bybit_spot",
+    "okx_spot",
+    "bitget_spot",
+    "mexc_spot",
 }
 
 _DISPLAY_NAMES = {
     "okx_dex": "OKX DEX",
     "binance_alpha": "Binance Alpha",
     "binance_spot": "Binance Spot",
+    "gate_spot": "Gate Spot",
+    "bybit_spot": "Bybit Spot",
+    "okx_spot": "OKX Spot",
+    "bitget_spot": "Bitget Spot",
+    "mexc_spot": "MEXC Spot",
     "binance": "Binance",
     "hyperliquid": "Hyperliquid",
     "gate": "Gate",

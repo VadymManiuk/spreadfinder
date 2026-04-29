@@ -76,6 +76,7 @@ from utils.deposit_checker import DepositChecker
 from symbol_mapper.mapper import SymbolMapper
 from exchange_adapters.binance import BinanceAdapter
 from exchange_adapters.binance_spot import BinanceSpotAdapter
+from exchange_adapters.spot_rest import SpotRestAdapter
 from exchange_adapters.hyperliquid import HyperliquidAdapter
 from exchange_adapters.gate import GateAdapter
 from exchange_adapters.bybit import BybitAdapter
@@ -157,6 +158,7 @@ class SpreadScanner:
         # to know which snapshots to compare for spreads.
         self._match_lookup: dict[tuple[str, str], list[tuple[str, str]]] = {}
         self._futures_by_base: dict[str, list[tuple[str, str]]] = {}
+        self._spot_by_base: dict[str, list[tuple[str, str]]] = {}
 
         # Alert batching: accumulate routes per base token, flush after window.
         # (route_kind, base_token) -> list of SpreadOpportunity
@@ -332,14 +334,21 @@ class SpreadScanner:
             return
         self._last_calc_time[key] = now
 
-        # Futures snapshots compare against the mapper-derived futures graph.
-        # DEX snapshots compare only when the DEX poll is fresh, against all
-        # futures venues that list the same normalized base asset.
+        # Futures snapshots compare against the mapper-derived futures graph
+        # plus any spot venues for the same base. Spot and DEX snapshots compare
+        # only against futures venues; spot-spot routes are intentionally ignored.
         if is_dex_exchange(snapshot.exchange):
             normalized_base = normalize_base(self._extract_base(snapshot.canonical_symbol))
             counterparts = self._futures_by_base.get(normalized_base, [])
+        elif is_spot_exchange(snapshot.exchange):
+            normalized_base = normalize_base(self._extract_base(snapshot.canonical_symbol))
+            counterparts = self._futures_by_base.get(normalized_base, [])
         else:
-            counterparts = self._match_lookup.get(key, [])
+            normalized_base = normalize_base(self._extract_base(snapshot.canonical_symbol))
+            counterparts = [
+                *self._match_lookup.get(key, []),
+                *self._spot_by_base.get(normalized_base, []),
+            ]
 
         for other_key in counterparts:
             other_snap = self._snapshots.get(other_key)
@@ -717,6 +726,16 @@ class SpreadScanner:
                     canonical_map=canonical_map,
                     stale_threshold_seconds=stale_threshold,
                 )
+            elif exchange in {"gate_spot", "bybit_spot", "okx_spot", "bitget_spot", "mexc_spot"}:
+                poll_interval = float(self.settings.spot.poll_interval_seconds)
+                adapter = SpotRestAdapter(
+                    exchange_name=exchange,
+                    symbols=native_symbols,
+                    on_snapshot=self._on_snapshot,
+                    canonical_map=canonical_map,
+                    poll_interval_seconds=poll_interval,
+                    stale_threshold_seconds=max(90.0, poll_interval * 3),
+                )
             else:
                 logger.warning("unknown_spot_adapter", exchange=exchange)
                 continue
@@ -801,6 +820,11 @@ class SpreadScanner:
         matchable = self._mapper.get_matchable_pairs()
 
         for pair in matchable:
+            if (
+                is_spot_exchange(pair["exchange_a"])
+                or is_spot_exchange(pair["exchange_b"])
+            ):
+                continue
             key_a = (pair["exchange_a"], pair["canonical_a"])
             key_b = (pair["exchange_b"], pair["canonical_b"])
             self._match_lookup.setdefault(key_a, []).append(key_b)
@@ -814,6 +838,14 @@ class SpreadScanner:
                 normalized_base = normalize_base(self._extract_base(canonical))
                 key = (exchange, canonical)
                 self._futures_by_base.setdefault(normalized_base, []).append(key)
+
+        self._spot_by_base.clear()
+        if self.settings.spot.enabled:
+            for exchange in self.settings.spot.enabled_exchanges:
+                for canonical in self._mapper.get_exchange_symbols(exchange):
+                    normalized_base = normalize_base(self._extract_base(canonical))
+                    key = (exchange, canonical)
+                    self._spot_by_base.setdefault(normalized_base, []).append(key)
 
         logger.info(
             "matchable_symbols",

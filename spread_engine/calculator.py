@@ -33,6 +33,11 @@ _1000X_PREFIX = "1000"
 DEFAULT_FEES: dict[str, tuple[Decimal, Decimal]] = {
     # (maker_rate, taker_rate)
     "binance_spot": (Decimal("0.0010"), Decimal("0.0010")), # 0.10% maker/taker spot  # ESTIMATE
+    "gate_spot":    (Decimal("0.0010"), Decimal("0.0010")), # 0.10% maker/taker spot  # ESTIMATE
+    "bybit_spot":   (Decimal("0.0010"), Decimal("0.0010")), # 0.10% maker/taker spot  # ESTIMATE
+    "okx_spot":     (Decimal("0.0010"), Decimal("0.0010")), # 0.10% maker/taker spot  # ESTIMATE
+    "bitget_spot":  (Decimal("0.0010"), Decimal("0.0010")), # 0.10% maker/taker spot  # ESTIMATE
+    "mexc_spot":    (Decimal("0.0010"), Decimal("0.0010")), # 0.10% maker/taker spot  # ESTIMATE
     "binance":     (Decimal("0.0002"), Decimal("0.0004")),   # 0.02% maker, 0.04% taker
     "hyperliquid": (Decimal("0.0002"), Decimal("0.0005")),   # 0.02% maker, 0.05% taker
     "gate":        (Decimal("0.00015"), Decimal("0.0005")),  # 0.015% maker, 0.05% taker

@@ -6,7 +6,7 @@ Inputs: Exchange name.
 Outputs: REST URL, response parser, native-to-canonical conversion rules.
 Assumptions:
   - Binance perpetuals use USDT-margined contracts with symbol format "BTCUSDT".
-  - Binance spot uses the same native symbol format but canonical symbols end in SPOT.
+  - CEX spot sources use canonical symbols ending in SPOT.
   - Hyperliquid perpetuals use just the base asset name, e.g. "BTC".
   - Gate perpetuals use underscore-separated format, e.g. "BTC_USDT".
 """
@@ -69,6 +69,98 @@ def binance_spot_native_to_canonical(native: str) -> str | None:
 
 def binance_spot_canonical_to_native(canonical: str) -> str | None:
     """Convert canonical "BTC-USDT-SPOT" to Binance spot "BTCUSDT"."""
+    parts = canonical.split("-")
+    if len(parts) != 3 or parts[2] != "SPOT":
+        return None
+    return f"{parts[0]}{parts[1]}"
+
+
+def gate_spot_native_to_canonical(native: str) -> str | None:
+    """Convert Gate spot "BTC_USDT" to "BTC-USDT-SPOT"."""
+    parts = native.split("_")
+    if len(parts) != 2:
+        return None
+    base, quote = parts
+    if not base or quote not in BINANCE_QUOTE_ASSETS:
+        return None
+    return f"{base}-{quote}-SPOT"
+
+
+def gate_spot_canonical_to_native(canonical: str) -> str | None:
+    """Convert canonical "BTC-USDT-SPOT" to Gate spot "BTC_USDT"."""
+    parts = canonical.split("-")
+    if len(parts) != 3 or parts[2] != "SPOT":
+        return None
+    return f"{parts[0]}_{parts[1]}"
+
+
+def bybit_spot_native_to_canonical(native: str) -> str | None:
+    """Convert Bybit spot "BTCUSDT" to "BTC-USDT-SPOT"."""
+    for quote in BYBIT_QUOTE_ASSETS:
+        if native.endswith(quote):
+            base = native[: -len(quote)]
+            if base:
+                return f"{base}-{quote}-SPOT"
+    return None
+
+
+def bybit_spot_canonical_to_native(canonical: str) -> str | None:
+    """Convert canonical "BTC-USDT-SPOT" to Bybit spot "BTCUSDT"."""
+    parts = canonical.split("-")
+    if len(parts) != 3 or parts[2] != "SPOT":
+        return None
+    return f"{parts[0]}{parts[1]}"
+
+
+def okx_spot_native_to_canonical(native: str) -> str | None:
+    """Convert OKX spot "BTC-USDT" to "BTC-USDT-SPOT"."""
+    parts = native.split("-")
+    if len(parts) != 2:
+        return None
+    base, quote = parts
+    if not base or quote not in BINANCE_QUOTE_ASSETS:
+        return None
+    return f"{base}-{quote}-SPOT"
+
+
+def okx_spot_canonical_to_native(canonical: str) -> str | None:
+    """Convert canonical "BTC-USDT-SPOT" to OKX spot "BTC-USDT"."""
+    parts = canonical.split("-")
+    if len(parts) != 3 or parts[2] != "SPOT":
+        return None
+    return f"{parts[0]}-{parts[1]}"
+
+
+def bitget_spot_native_to_canonical(native: str) -> str | None:
+    """Convert Bitget spot "BTCUSDT" to "BTC-USDT-SPOT"."""
+    for quote in BITGET_QUOTE_ASSETS:
+        if native.endswith(quote):
+            base = native[: -len(quote)]
+            if base:
+                return f"{base}-{quote}-SPOT"
+    return None
+
+
+def bitget_spot_canonical_to_native(canonical: str) -> str | None:
+    """Convert canonical "BTC-USDT-SPOT" to Bitget spot "BTCUSDT"."""
+    parts = canonical.split("-")
+    if len(parts) != 3 or parts[2] != "SPOT":
+        return None
+    return f"{parts[0]}{parts[1]}"
+
+
+def mexc_spot_native_to_canonical(native: str) -> str | None:
+    """Convert MEXC spot "BTCUSDT" to "BTC-USDT-SPOT"."""
+    for quote in BINANCE_QUOTE_ASSETS:
+        if native.endswith(quote):
+            base = native[: -len(quote)]
+            if base:
+                return f"{base}-{quote}-SPOT"
+    return None
+
+
+def mexc_spot_canonical_to_native(canonical: str) -> str | None:
+    """Convert canonical "BTC-USDT-SPOT" to MEXC spot "BTCUSDT"."""
     parts = canonical.split("-")
     if len(parts) != 3 or parts[2] != "SPOT":
         return None
@@ -158,6 +250,68 @@ def _parse_binance_spot_symbols(data: dict) -> list[str]:
             and s.get("isSpotTradingAllowed") is True
             and any(symbol.endswith(quote) for quote in BINANCE_QUOTE_ASSETS)
         ):
+            symbols.append(symbol)
+    return symbols
+
+
+def _parse_gate_spot_symbols(data: list) -> list[str]:
+    """Extract tradable Gate spot currency pairs."""
+    symbols = []
+    for pair in data:
+        if not isinstance(pair, dict):
+            continue
+        pair_id = pair.get("id", "")
+        quote = pair.get("quote", "")
+        trade_status = pair.get("trade_status", "")
+        if pair_id and quote in BINANCE_QUOTE_ASSETS and trade_status == "tradable":
+            symbols.append(pair_id)
+    return symbols
+
+
+def _parse_bybit_spot_symbols(data: dict) -> list[str]:
+    """Extract tradable Bybit spot symbols."""
+    result = data.get("result", {})
+    symbols = []
+    for item in result.get("list", []):
+        symbol = item.get("symbol", "")
+        if item.get("status") == "Trading" and symbol:
+            symbols.append(symbol)
+    return symbols
+
+
+def _parse_okx_spot_symbols(data: dict) -> list[str]:
+    """Extract live OKX spot USDT/USDC instruments."""
+    symbols = []
+    for item in data.get("data", []):
+        if (
+            item.get("instType") == "SPOT"
+            and item.get("state") == "live"
+            and item.get("quoteCcy") in BINANCE_QUOTE_ASSETS
+        ):
+            symbols.append(item["instId"])
+    return symbols
+
+
+def _parse_bitget_spot_symbols(data: dict) -> list[str]:
+    """Extract online Bitget spot symbols."""
+    symbols = []
+    for item in data.get("data", []):
+        symbol = item.get("symbol", "")
+        quote = item.get("quoteCoin", "")
+        status = item.get("status", "")
+        if symbol and quote in BINANCE_QUOTE_ASSETS and status == "online":
+            symbols.append(symbol)
+    return symbols
+
+
+def _parse_mexc_spot_symbols(data: dict) -> list[str]:
+    """Extract enabled MEXC spot symbols."""
+    symbols = []
+    for item in data.get("symbols", []):
+        symbol = item.get("symbol", "")
+        quote = item.get("quoteAsset", "")
+        status = str(item.get("status", "")).upper()
+        if symbol and quote in BINANCE_QUOTE_ASSETS and status in {"1", "ENABLED", "TRADING"}:
             symbols.append(symbol)
     return symbols
 
@@ -444,6 +598,41 @@ EXCHANGE_CONFIGS: dict[str, ExchangeConfig] = {
         to_canonical=binance_spot_native_to_canonical,
         to_native=binance_spot_canonical_to_native,
         parse_symbols=_parse_binance_spot_symbols,
+    ),
+    "gate_spot": ExchangeConfig(
+        name="gate_spot",
+        rest_url="https://api.gateio.ws/api/v4/spot/currency_pairs",
+        to_canonical=gate_spot_native_to_canonical,
+        to_native=gate_spot_canonical_to_native,
+        parse_symbols=_parse_gate_spot_symbols,
+    ),
+    "bybit_spot": ExchangeConfig(
+        name="bybit_spot",
+        rest_url="https://api.bybit.com/v5/market/instruments-info?category=spot",
+        to_canonical=bybit_spot_native_to_canonical,
+        to_native=bybit_spot_canonical_to_native,
+        parse_symbols=_parse_bybit_spot_symbols,
+    ),
+    "okx_spot": ExchangeConfig(
+        name="okx_spot",
+        rest_url="https://www.okx.com/api/v5/public/instruments?instType=SPOT",
+        to_canonical=okx_spot_native_to_canonical,
+        to_native=okx_spot_canonical_to_native,
+        parse_symbols=_parse_okx_spot_symbols,
+    ),
+    "bitget_spot": ExchangeConfig(
+        name="bitget_spot",
+        rest_url="https://api.bitget.com/api/v2/spot/public/symbols",
+        to_canonical=bitget_spot_native_to_canonical,
+        to_native=bitget_spot_canonical_to_native,
+        parse_symbols=_parse_bitget_spot_symbols,
+    ),
+    "mexc_spot": ExchangeConfig(
+        name="mexc_spot",
+        rest_url="https://api.mexc.com/api/v3/exchangeInfo",
+        to_canonical=mexc_spot_native_to_canonical,
+        to_native=mexc_spot_canonical_to_native,
+        parse_symbols=_parse_mexc_spot_symbols,
     ),
     "binance": ExchangeConfig(
         name="binance",

@@ -208,8 +208,20 @@ class SpotSettings(BaseSettings):
     # Master switch for spot-to-futures spread alert delivery
     enabled: bool = True
 
-    # Spot sources to load. Currently supported: binance_spot.
-    enabled_exchanges: list[str] = Field(default_factory=lambda: ["binance_spot"])
+    # Spot sources to load.
+    enabled_exchanges: list[str] = Field(
+        default_factory=lambda: [
+            "binance_spot",
+            "gate_spot",
+            "bybit_spot",
+            "okx_spot",
+            "bitget_spot",
+            "mexc_spot",
+        ]
+    )
+
+    # Polling cadence for non-Binance spot sources.
+    poll_interval_seconds: int = 30
 
     # Route quality thresholds
     min_net_spread_bps: Decimal = Decimal("100.0")

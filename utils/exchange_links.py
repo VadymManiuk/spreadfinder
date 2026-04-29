@@ -23,6 +23,11 @@ from typing import Callable
 _BUILDERS: dict[str, Callable[[str], str]] = {
     # CEXes
     "binance_spot": lambda b: f"https://www.binance.com/en/trade/{b}_USDT?type=spot",
+    "gate_spot":    lambda b: f"https://www.gate.io/trade/{b}_USDT",
+    "bybit_spot":   lambda b: f"https://www.bybit.com/en/trade/spot/{b}/USDT",
+    "okx_spot":     lambda b: f"https://www.okx.com/trade-spot/{b.lower()}-usdt",
+    "bitget_spot":  lambda b: f"https://www.bitget.com/spot/{b}USDT",
+    "mexc_spot":    lambda b: f"https://www.mexc.com/exchange/{b}_USDT",
     "binance": lambda b: f"https://www.binance.com/en/futures/{b}USDT",
     "bybit":   lambda b: f"https://www.bybit.com/trade/usdt/{b}USDT",
     "gate":    lambda b: f"https://www.gate.io/futures/USDT/{b}_USDT",
