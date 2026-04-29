@@ -1,11 +1,12 @@
 """
 Exchange-specific symbol format definitions and REST endpoints for fetching
-perpetual futures symbol lists.
+perpetual futures and spot symbol lists.
 
 Inputs: Exchange name.
 Outputs: REST URL, response parser, native-to-canonical conversion rules.
 Assumptions:
   - Binance perpetuals use USDT-margined contracts with symbol format "BTCUSDT".
+  - Binance spot uses the same native symbol format but canonical symbols end in SPOT.
   - Hyperliquid perpetuals use just the base asset name, e.g. "BTC".
   - Gate perpetuals use underscore-separated format, e.g. "BTC_USDT".
 """
@@ -13,8 +14,9 @@ Assumptions:
 from dataclasses import dataclass
 from typing import Callable
 
-# Canonical format: {BASE}-{QUOTE}-PERP
-# Example: "BTC-USDT-PERP"
+# Canonical formats:
+#   - Futures: {BASE}-{QUOTE}-PERP, e.g. "BTC-USDT-PERP"
+#   - Spot:    {BASE}-{QUOTE}-SPOT, e.g. "BTC-USDT-SPOT"
 
 # Known USDT-quoted stablecoins and quote assets to strip from Binance symbols.
 # TODO — review this list periodically; new quote assets may appear.
@@ -46,6 +48,29 @@ def binance_canonical_to_native(canonical: str) -> str | None:
     """Convert canonical "BTC-USDT-PERP" to Binance "BTCUSDT"."""
     parts = canonical.split("-")
     if len(parts) != 3 or parts[2] != "PERP":
+        return None
+    return f"{parts[0]}{parts[1]}"
+
+
+def binance_spot_native_to_canonical(native: str) -> str | None:
+    """
+    Convert Binance spot native symbol to canonical format.
+
+    Binance spot symbols: "BTCUSDT", "AIUSDT", etc.
+    Returns None if the symbol doesn't match a stable quote asset.
+    """
+    for quote in BINANCE_QUOTE_ASSETS:
+        if native.endswith(quote):
+            base = native[: -len(quote)]
+            if base:
+                return f"{base}-{quote}-SPOT"
+    return None
+
+
+def binance_spot_canonical_to_native(canonical: str) -> str | None:
+    """Convert canonical "BTC-USDT-SPOT" to Binance spot "BTCUSDT"."""
+    parts = canonical.split("-")
+    if len(parts) != 3 or parts[2] != "SPOT":
         return None
     return f"{parts[0]}{parts[1]}"
 
@@ -116,6 +141,24 @@ def _parse_binance_symbols(data: dict) -> list[str]:
     for s in data.get("symbols", []):
         if s.get("contractType") == "PERPETUAL" and s.get("status") == "TRADING":
             symbols.append(s["symbol"])
+    return symbols
+
+
+def _parse_binance_spot_symbols(data: dict) -> list[str]:
+    """
+    Extract tradable Binance spot symbols from exchangeInfo response.
+
+    Keep only symbols with spot trading enabled and a known quote asset.
+    """
+    symbols = []
+    for s in data.get("symbols", []):
+        symbol = s.get("symbol", "")
+        if (
+            s.get("status") == "TRADING"
+            and s.get("isSpotTradingAllowed") is True
+            and any(symbol.endswith(quote) for quote in BINANCE_QUOTE_ASSETS)
+        ):
+            symbols.append(symbol)
     return symbols
 
 
@@ -395,6 +438,13 @@ def _parse_mexc_symbols(data: dict) -> list[str]:
 
 # Registry of supported exchanges
 EXCHANGE_CONFIGS: dict[str, ExchangeConfig] = {
+    "binance_spot": ExchangeConfig(
+        name="binance_spot",
+        rest_url="https://api.binance.com/api/v3/exchangeInfo",
+        to_canonical=binance_spot_native_to_canonical,
+        to_native=binance_spot_canonical_to_native,
+        parse_symbols=_parse_binance_spot_symbols,
+    ),
     "binance": ExchangeConfig(
         name="binance",
         rest_url="https://fapi.binance.com/fapi/v1/exchangeInfo",

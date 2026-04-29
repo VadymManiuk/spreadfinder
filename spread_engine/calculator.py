@@ -1,12 +1,13 @@
 """
 Cross-exchange spread calculator.
 
-Inputs: Two MarketSnapshot objects for the same canonical symbol on different exchanges.
+Inputs: Two MarketSnapshot objects for the same base asset on different venues.
 Outputs: Up to two SpreadOpportunity objects (one per direction).
 Assumptions:
   - Fee estimates are rough defaults per exchange. Marked as ESTIMATE.
   - Slippage factor is a flat multiplier on mid price. Marked as ESTIMATE.
   - Both directions (A→B and B→A) are checked.
+  - Spot-vs-perp comparisons are allowed when the base asset matches.
 """
 
 from datetime import datetime, timezone
@@ -31,6 +32,7 @@ _1000X_PREFIX = "1000"
 # ESTIMATE — these are standard tiers, actual rates depend on VIP level
 DEFAULT_FEES: dict[str, tuple[Decimal, Decimal]] = {
     # (maker_rate, taker_rate)
+    "binance_spot": (Decimal("0.0010"), Decimal("0.0010")), # 0.10% maker/taker spot  # ESTIMATE
     "binance":     (Decimal("0.0002"), Decimal("0.0004")),   # 0.02% maker, 0.04% taker
     "hyperliquid": (Decimal("0.0002"), Decimal("0.0005")),   # 0.02% maker, 0.05% taker
     "gate":        (Decimal("0.00015"), Decimal("0.0005")),  # 0.015% maker, 0.05% taker
@@ -97,7 +99,9 @@ def _estimate_slippage(mid_price: Decimal) -> Decimal:
 def _extract_base(canonical: str) -> str | None:
     """Extract base asset from canonical symbol. 'APE-USDT-PERP' → 'APE'."""
     parts = canonical.split("-")
-    return parts[0] if len(parts) == 3 else None
+    if len(parts) != 3 or parts[2] not in {"PERP", "SPOT"}:
+        return None
+    return parts[0]
 
 
 def _get_price_multiplier(base: str) -> Decimal:
@@ -143,6 +147,7 @@ def _normalize_snapshot_prices(
         index_price=snap.index_price / multiplier if snap.index_price else None,
         funding_rate=snap.funding_rate,
         volume_24h=snap.volume_24h,
+        next_funding_time=snap.next_funding_time,
         is_stale=snap.is_stale,
     )
 

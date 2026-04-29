@@ -10,8 +10,14 @@ from decimal import Decimal
 
 import pytest
 
-from alerting.formatter import escape_md2, format_alert, _fmt_volume, _fmt_funding
-from models.snapshot import SpreadOpportunity
+from alerting.formatter import (
+    escape_md2,
+    format_alert,
+    format_grouped_alert,
+    _fmt_volume,
+    _fmt_funding,
+)
+from models.snapshot import MarketSnapshot, SpreadOpportunity
 
 
 NOW = datetime(2026, 1, 1, 12, 30, 45, tzinfo=timezone.utc)
@@ -192,3 +198,45 @@ class TestFormatAlert:
         import re
         unescaped_stars = re.findall(r'(?<!\\)\*', msg)
         assert len(unescaped_stars) % 2 == 0, "Unbalanced bold markers"
+
+
+class TestGroupedSpotAlert:
+
+    def test_spot_exchange_uses_spot_funding_label(self):
+        opp = make_opp(
+            canonical_symbol="AI-USDT-SPOT",
+            buy_exchange="binance_spot",
+            sell_exchange="gate",
+            buy_ask=Decimal("0.1200"),
+            sell_bid=Decimal("0.1240"),
+            buy_funding_rate=None,
+            sell_funding_rate=Decimal("0.0001"),
+        )
+        all_snapshots = {
+            "binance_spot": MarketSnapshot(
+                canonical_symbol="AI-USDT-SPOT",
+                exchange="binance_spot",
+                bid=Decimal("0.1199"),
+                ask=Decimal("0.1200"),
+                bid_size=Decimal("1000"),
+                ask_size=Decimal("1000"),
+                local_ts=NOW,
+            ),
+            "gate": MarketSnapshot(
+                canonical_symbol="AI-USDT-PERP",
+                exchange="gate",
+                bid=Decimal("0.1240"),
+                ask=Decimal("0.1242"),
+                bid_size=Decimal("1000"),
+                ask_size=Decimal("1000"),
+                funding_rate=Decimal("0.0001"),
+                local_ts=NOW,
+            ),
+        }
+
+        msg = format_grouped_alert([opp], all_snapshots=all_snapshots)
+
+        unescaped = msg.replace("\\", "")
+        assert "Binance Spot" in unescaped
+        assert "spot" in unescaped
+        assert "Binance Spot:" not in unescaped

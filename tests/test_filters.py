@@ -285,8 +285,47 @@ class TestFilterChain:
         passed, results = chain.evaluate(make_opp())
         assert not passed
         # Should stop immediately after the first real threshold failure.
-        assert len(results) == 2
-        assert results[1].filter_name == "min_gross_spread"
+        assert len(results) == 3
+        assert results[2].filter_name == "min_gross_spread"
+
+    def test_spot_disabled_rejects_spot_route(self):
+        chain = FilterChain(
+            spot_enabled=False,
+            min_gross_spread_bps=Decimal("1"),
+            min_net_spread_bps=Decimal("1"),
+            cooldown_seconds=0,
+            persistence_ms=0,
+        )
+        opp = make_opp(
+            canonical_symbol="AI-USDT-SPOT",
+            buy_exchange="binance_spot",
+            sell_exchange="gate",
+        )
+
+        passed, results = chain.evaluate(opp)
+
+        assert not passed
+        assert results[-1].filter_name == "spot_enabled"
+
+    def test_spot_route_uses_spot_min_net_spread(self):
+        chain = FilterChain(
+            min_gross_spread_bps=Decimal("1"),
+            min_net_spread_bps=Decimal("1"),
+            spot_min_net_spread_bps=Decimal("50"),
+            cooldown_seconds=0,
+            persistence_ms=0,
+        )
+        opp = make_opp(
+            canonical_symbol="AI-USDT-SPOT",
+            buy_exchange="binance_spot",
+            sell_exchange="gate",
+            net_spread_bps=Decimal("41.67"),
+        )
+
+        passed, results = chain.evaluate(opp)
+
+        assert not passed
+        assert results[-1].filter_name == "min_net_spread"
 
     def test_configurable_max_gross_spread_can_allow_large_moves(self):
         chain = FilterChain(

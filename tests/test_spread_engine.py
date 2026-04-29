@@ -117,6 +117,27 @@ class TestCalculateSpread:
         assert len(buy_on_a) == 1
         assert buy_on_a[0].gross_spread == Decimal("0.0100")
 
+    def test_spot_vs_perp_same_base_works(self):
+        """Spot canonical symbols should compare against perp canonical symbols."""
+        spot = make_snap(
+            exchange="binance_spot",
+            canonical_symbol="AI-USDT-SPOT",
+            ask="0.1200",
+        )
+        perp = make_snap(
+            exchange="gate",
+            canonical_symbol="AI-USDT-PERP",
+            bid="0.1240",
+        )
+
+        opps = calculate_spread(spot, perp, now=NOW)
+        buy_spot = [o for o in opps if o.buy_exchange == "binance_spot"]
+
+        assert len(buy_spot) == 1
+        assert buy_spot[0].sell_exchange == "gate"
+        assert buy_spot[0].gross_spread == Decimal("0.0040")
+        assert buy_spot[0].canonical_symbol == "AI-USDT-SPOT"
+
     def test_cross_quote_different_base_rejected(self):
         """Different base assets should still be rejected even with equivalent quotes."""
         snap_a = make_snap(canonical_symbol="APE-USDT-PERP")

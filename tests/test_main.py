@@ -119,6 +119,14 @@ def test_pump_alerts_fall_back_to_main_chat_id_for_secondary_bot():
     assert scanner._pump_telegram.chat_id == "main-chat"
 
 
+def test_route_kind_classifies_spot_futures_separately():
+    scanner = _make_scanner(["binance", "gate"])
+
+    assert scanner._route_kind("binance_spot", "gate") == "spot_futures"
+    assert scanner._route_kind("gate", "binance_spot") == "spot_futures"
+    assert scanner._route_kind("binance", "gate") == "perp"
+
+
 @pytest.mark.asyncio
 async def test_pump_alert_send_falls_back_to_main_sender_on_secondary_failure():
     scanner = SpreadScanner(Settings(enabled_exchanges=["binance"]))

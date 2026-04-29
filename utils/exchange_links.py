@@ -2,12 +2,11 @@
 Exchange trading-pair URL builder.
 
 Inputs: Exchange identifier (e.g. "binance"), base token ticker (e.g. "ARIA").
-Outputs: HTTPS URL to the exchange's perpetual/futures trading page for that
+Outputs: HTTPS URL to the exchange's trading page for that
          pair, or None if the exchange is unknown.
 Assumptions:
   - All supported exchanges list USDT-margined perps — so the quote is USDT.
-  - Futures/perp markets are preferred; there is no spot fallback on purpose
-    because this bot only watches perpetuals.
+  - Perp markets are preferred except for explicitly named spot venues.
   - Base tickers arrive in uppercase canonical form (e.g. "BTC", "SPACEX").
 """
 
@@ -23,6 +22,7 @@ from typing import Callable
 # don't need to change.
 _BUILDERS: dict[str, Callable[[str], str]] = {
     # CEXes
+    "binance_spot": lambda b: f"https://www.binance.com/en/trade/{b}_USDT?type=spot",
     "binance": lambda b: f"https://www.binance.com/en/futures/{b}USDT",
     "bybit":   lambda b: f"https://www.bybit.com/trade/usdt/{b}USDT",
     "gate":    lambda b: f"https://www.gate.io/futures/USDT/{b}_USDT",

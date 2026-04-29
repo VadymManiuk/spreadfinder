@@ -195,6 +195,27 @@ class DexSettings(BaseSettings):
     okx_chain_indices: str = "8453"
 
 
+class SpotSettings(BaseSettings):
+    """
+    Spot-to-futures alert configuration.
+
+    Spot sources are compared against live futures quotes for the same base
+    asset. Alerts are only emitted for buy-spot, sell/short-futures routes.
+    """
+
+    model_config = SettingsConfigDict(env_prefix="SPOT_", **_ENV_FILE_CONFIG)
+
+    # Master switch for spot-to-futures spread alert delivery
+    enabled: bool = True
+
+    # Spot sources to load. Currently supported: binance_spot.
+    enabled_exchanges: list[str] = Field(default_factory=lambda: ["binance_spot"])
+
+    # Route quality thresholds
+    min_net_spread_bps: Decimal = Decimal("100.0")
+    min_volume_24h: Decimal | None = None
+
+
 class OkxAuthSettings(BaseSettings):
     """
     Shared OKX API credentials.
@@ -230,6 +251,7 @@ class Settings(BaseSettings):
     adapter: AdapterSettings = Field(default_factory=AdapterSettings)
     pump: PumpSettings = Field(default_factory=PumpSettings)
     dex: DexSettings = Field(default_factory=DexSettings)
+    spot: SpotSettings = Field(default_factory=SpotSettings)
     okx_auth: OkxAuthSettings = Field(default_factory=OkxAuthSettings)
 
     # Logging

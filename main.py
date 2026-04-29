@@ -75,6 +75,7 @@ from utils.logging import setup_logging
 from utils.deposit_checker import DepositChecker
 from symbol_mapper.mapper import SymbolMapper
 from exchange_adapters.binance import BinanceAdapter
+from exchange_adapters.binance_spot import BinanceSpotAdapter
 from exchange_adapters.hyperliquid import HyperliquidAdapter
 from exchange_adapters.gate import GateAdapter
 from exchange_adapters.bybit import BybitAdapter
@@ -93,7 +94,7 @@ from filters.market_cap_filter import MarketCapFilter
 from alerting.telegram import TelegramSender
 from models.snapshot import MarketSnapshot
 from pump_detector import PriceHistory, PumpDetector
-from utils.venues import is_dex_exchange
+from utils.venues import is_dex_exchange, is_spot_exchange
 
 logger = structlog.get_logger(__name__)
 
@@ -140,6 +141,8 @@ class SpreadScanner:
             "spreads_sent": 0,             # sent via telegram
             "dex_spreads_sent": 0,         # sent DEX -> futures alerts
             "dex_rejected_direction": 0,   # rejected invalid futures -> DEX routes
+            "spot_spreads_sent": 0,        # sent spot -> futures alerts
+            "spot_rejected_direction": 0,  # rejected invalid futures -> spot routes
             "spreads_rejected_hard": 0,    # rejected by <1% hard check
             "spreads_rejected_filter": 0,  # rejected by filter chain
             "last_spread_alert_ts": None,  # datetime of last spread alert
@@ -165,7 +168,12 @@ class SpreadScanner:
         self._deposit_checker = DepositChecker()
 
         # Components
-        self._mapper = SymbolMapper(exchanges=settings.enabled_exchanges)
+        mapper_exchanges = list(settings.enabled_exchanges)
+        if settings.spot.enabled:
+            for exchange in settings.spot.enabled_exchanges:
+                if exchange not in mapper_exchanges:
+                    mapper_exchanges.append(exchange)
+        self._mapper = SymbolMapper(exchanges=mapper_exchanges)
         self._filter_chain = FilterChain(
             min_gross_spread_bps=settings.filters.min_gross_spread_bps,
             max_gross_spread_bps=settings.filters.max_gross_spread_bps,
@@ -173,6 +181,9 @@ class SpreadScanner:
             dex_enabled=settings.dex.enabled,
             dex_min_net_spread_bps=settings.dex.min_net_spread_pct * Decimal("100"),
             dex_min_volume_24h=settings.dex.min_volume_24h,
+            spot_enabled=settings.spot.enabled,
+            spot_min_net_spread_bps=settings.spot.min_net_spread_bps,
+            spot_min_volume_24h=settings.spot.min_volume_24h,
             min_bid_size=settings.filters.min_bid_size,
             min_ask_size=settings.filters.min_ask_size,
             min_volume_24h=settings.filters.min_volume_24h,
@@ -189,6 +200,8 @@ class SpreadScanner:
             dex_enabled=settings.dex.enabled,
             dex_min_net_spread_pct=float(settings.dex.min_net_spread_pct),
             dex_min_volume_24h=float(settings.dex.min_volume_24h),
+            spot_enabled=settings.spot.enabled,
+            spot_min_net_spread_bps=float(settings.spot.min_net_spread_bps),
         )
         self._telegram = TelegramSender(
             bot_token=settings.telegram.bot_token,
@@ -291,6 +304,8 @@ class SpreadScanner:
         """Classify an opportunity so DEX alerts batch separately from perp-perp."""
         if is_dex_exchange(buy_exchange) or is_dex_exchange(sell_exchange):
             return "dex"
+        if is_spot_exchange(buy_exchange) or is_spot_exchange(sell_exchange):
+            return "spot_futures"
         return "perp"
 
     async def _on_snapshot(self, snapshot: MarketSnapshot) -> None:
@@ -344,6 +359,9 @@ class SpreadScanner:
                 # buy-on-DEX, sell/short-on-futures.
                 if route_kind == "dex" and not is_dex_exchange(opp.buy_exchange):
                     self._diag["dex_rejected_direction"] += 1
+                    continue
+                if route_kind == "spot_futures" and not is_spot_exchange(opp.buy_exchange):
+                    self._diag["spot_rejected_direction"] += 1
                     continue
 
                 # HARD SAFETY CHECK — never send alerts below 1% net spread
@@ -402,6 +420,9 @@ class SpreadScanner:
         if route_kind == "dex" and not self._filter_chain.dex_enabled:
             logger.info("dex_flush_skipped", base=base, reason="disabled")
             return
+        if route_kind == "spot_futures" and not self._filter_chain.spot_enabled:
+            logger.info("spot_futures_flush_skipped", base=base, reason="disabled")
+            return
 
         try:
             # Sort by net spread descending (best route first)
@@ -448,6 +469,8 @@ class SpreadScanner:
                 self._diag["spreads_sent"] += 1
                 if route_kind == "dex":
                     self._diag["dex_spreads_sent"] += 1
+                if route_kind == "spot_futures":
+                    self._diag["spot_spreads_sent"] += 1
                 self._diag["last_spread_alert_ts"] = datetime.now(timezone.utc)
                 self._diag["last_spread_symbol"] = base
         except Exception:
@@ -653,6 +676,58 @@ class SpreadScanner:
                 symbol_count=len(native_symbols),
             )
 
+    def _build_spot_adapters(self) -> None:
+        """Create spot adapters used for spot-to-futures spread alerts."""
+        if not self.settings.spot.enabled:
+            logger.info("spot_adapters_skipped", reason="disabled")
+            return
+
+        futures_bases = set(self._futures_by_base.keys())
+        if not futures_bases:
+            logger.warning("spot_adapters_skipped", reason="no futures bases available")
+            return
+
+        for exchange in self.settings.spot.enabled_exchanges:
+            symbols_canonical = [
+                canonical
+                for canonical in self._mapper.get_exchange_symbols(exchange)
+                if normalize_base(self._extract_base(canonical)) in futures_bases
+            ]
+            if not symbols_canonical:
+                logger.warning("no_spot_symbols_for_exchange", exchange=exchange)
+                continue
+
+            native_symbols = []
+            canonical_map = {}
+            for canonical in symbols_canonical:
+                native = self._mapper.to_native(exchange, canonical)
+                if native:
+                    native_symbols.append(native)
+                    canonical_map[native] = canonical
+
+            if not native_symbols:
+                continue
+
+            stale_threshold = self.settings.adapter.stale_threshold_seconds
+
+            if exchange == "binance_spot":
+                adapter = BinanceSpotAdapter(
+                    symbols=native_symbols,
+                    on_snapshot=self._on_snapshot,
+                    canonical_map=canonical_map,
+                    stale_threshold_seconds=stale_threshold,
+                )
+            else:
+                logger.warning("unknown_spot_adapter", exchange=exchange)
+                continue
+
+            self._adapters.append(adapter)
+            logger.info(
+                "adapter_created",
+                exchange=exchange,
+                symbol_count=len(native_symbols),
+            )
+
     def _build_dex_adapters(self) -> None:
         """Create DEX polling adapters that compare on-chain prices vs futures."""
         allowed_bases = set(self._futures_by_base.keys())
@@ -748,6 +823,7 @@ class SpreadScanner:
 
         # Step 2: Build adapters (only subscribe to symbols in matchable pairs)
         self._build_adapters()
+        self._build_spot_adapters()
         self._build_dex_adapters()
 
         if not self._adapters:

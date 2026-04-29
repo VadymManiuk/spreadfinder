@@ -2,9 +2,10 @@
 Cross-exchange symbol mapper.
 
 Inputs: Native exchange symbols (e.g. "BTCUSDT", "BTC", "BTC_USDT").
-Outputs: Canonical symbols ("{BASE}-{QUOTE}-PERP") and reverse lookups.
+Outputs: Canonical symbols ("{BASE}-{QUOTE}-{PERP|SPOT}") and reverse lookups.
 Assumptions:
-  - Only perpetual futures are mapped. Dated futures and spot are excluded.
+  - Perpetual futures and explicitly configured spot sources are mapped.
+    Dated futures are excluded.
   - Ambiguous or unrecognized symbols are skipped with a warning log.
   - Symbol lists are bootstrapped from exchange REST APIs on startup.
   - Quote-equivalent stablecoins (USDT ↔ USDC) are treated as matchable
@@ -20,6 +21,13 @@ from symbol_mapper.exchange_symbols import EXCHANGE_CONFIGS, ExchangeConfig
 from symbol_mapper.ticker_aliases import normalize_base, TICKER_COLLISIONS
 
 logger = structlog.get_logger(__name__)
+
+# Collisions are normally excluded globally because the same ticker can refer
+# to different assets across venues. User-requested pairs below are allowed only
+# when the venue pair is known and the raw base matches exactly.
+_COLLISION_PAIR_ALLOWLIST: dict[str, set[frozenset[str]]] = {
+    "AI": {frozenset({"binance_spot", "gate"})},
+}
 
 # Per-exchange REST bootstrap timeout. Without this, a single slow/hung
 # endpoint blocks the entire startup. 15s is enough for any healthy exchange
@@ -289,7 +297,7 @@ class SymbolMapper:
     def extract_base(canonical: str) -> str | None:
         """Extract base asset from canonical symbol. 'APE-USDT-PERP' → 'APE'."""
         parts = canonical.split("-")
-        if len(parts) != 3 or parts[2] != "PERP":
+        if len(parts) != 3 or parts[2] not in {"PERP", "SPOT"}:
             return None
         return parts[0]
 
@@ -297,7 +305,7 @@ class SymbolMapper:
     def extract_quote(canonical: str) -> str | None:
         """Extract quote asset from canonical symbol. 'APE-USDT-PERP' → 'USDT'."""
         parts = canonical.split("-")
-        if len(parts) != 3 or parts[2] != "PERP":
+        if len(parts) != 3 or parts[2] not in {"PERP", "SPOT"}:
             return None
         return parts[1]
 
@@ -329,7 +337,7 @@ class SymbolMapper:
         """
         # Build: exchange -> {normalized_base: canonical_symbol}
         # Uses ticker aliases so e.g. 1000PEPE and PEPE both normalize to "PEPE"
-        # Skips tickers known to collide (same name, different token) across exchanges
+        # Skips unsafe ticker collisions at pair-construction time.
         exchange_bases: dict[str, dict[str, str]] = {}
         skipped_collisions: list[str] = []
         for exchange in self._exchange_names:
@@ -340,20 +348,8 @@ class SymbolMapper:
                 if base and quote:
                     # Normalize base asset name using alias map
                     normalized = normalize_base(base)
-                    # Skip known ticker collisions
-                    if normalized in TICKER_COLLISIONS:
-                        if normalized not in skipped_collisions:
-                            skipped_collisions.append(normalized)
-                        continue
                     bases[normalized] = canonical
             exchange_bases[exchange] = bases
-
-        if skipped_collisions:
-            logger.info(
-                "ticker_collisions_skipped",
-                count=len(skipped_collisions),
-                tickers=skipped_collisions[:10],
-            )
 
         pairs: list[dict] = []
         names = [n for n in self._exchange_names if n in exchange_bases]
@@ -371,6 +367,17 @@ class SymbolMapper:
                     quote_a = self.extract_quote(canon_a)
                     quote_b = self.extract_quote(canon_b)
 
+                    if norm_base in TICKER_COLLISIONS and not self._is_collision_pair_allowed(
+                        norm_base,
+                        ex_a,
+                        canon_a,
+                        ex_b,
+                        canon_b,
+                    ):
+                        if norm_base not in skipped_collisions:
+                            skipped_collisions.append(norm_base)
+                        continue
+
                     if quote_a and quote_b and self.are_quotes_equivalent(quote_a, quote_b):
                         pairs.append({
                             "base": norm_base,
@@ -380,5 +387,37 @@ class SymbolMapper:
                             "canonical_b": canon_b,
                         })
 
+        if skipped_collisions:
+            logger.info(
+                "ticker_collisions_skipped",
+                count=len(skipped_collisions),
+                tickers=skipped_collisions[:10],
+            )
+
         logger.info("matchable_pairs_found", count=len(pairs))
         return pairs
+
+    @staticmethod
+    def _is_collision_pair_allowed(
+        normalized_base: str,
+        exchange_a: str,
+        canonical_a: str,
+        exchange_b: str,
+        canonical_b: str,
+    ) -> bool:
+        """
+        Return True for explicitly allowed collision pairs.
+
+        For collision tickers we require both venues to be allowlisted and the
+        raw base tickers to match exactly. This avoids aliasing two unrelated
+        assets through a broad ticker name.
+        """
+        allowed_pairs = _COLLISION_PAIR_ALLOWLIST.get(normalized_base)
+        if not allowed_pairs:
+            return False
+        if frozenset({exchange_a, exchange_b}) not in allowed_pairs:
+            return False
+
+        base_a = SymbolMapper.extract_base(canonical_a)
+        base_b = SymbolMapper.extract_base(canonical_b)
+        return base_a == base_b == normalized_base

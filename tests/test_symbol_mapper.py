@@ -10,6 +10,8 @@ import pytest
 from symbol_mapper.exchange_symbols import (
     binance_native_to_canonical,
     binance_canonical_to_native,
+    binance_spot_native_to_canonical,
+    binance_spot_canonical_to_native,
     hyperliquid_native_to_canonical,
     hyperliquid_canonical_to_native,
     gate_native_to_canonical,
@@ -54,6 +56,21 @@ class TestBinanceConversion:
     def test_canonical_to_native_invalid(self):
         assert binance_canonical_to_native("BTC-USDT") is None
         assert binance_canonical_to_native("BTC-USDT-SPOT") is None
+
+
+class TestBinanceSpotConversion:
+
+    def test_aiusdt(self):
+        assert binance_spot_native_to_canonical("AIUSDT") == "AI-USDT-SPOT"
+
+    def test_round_trip(self):
+        canonical = binance_spot_native_to_canonical("SOLUSDT")
+        assert canonical == "SOL-USDT-SPOT"
+        assert binance_spot_canonical_to_native(canonical) == "SOLUSDT"
+
+    def test_canonical_to_native_invalid(self):
+        assert binance_spot_canonical_to_native("BTC-USDT-PERP") is None
+        assert binance_spot_canonical_to_native("BTC-USDT") is None
 
 
 # ---------------------------------------------------------------------------
@@ -214,6 +231,7 @@ class TestQuoteEquivalence:
     def test_extract_base(self):
         assert SymbolMapper.extract_base("APE-USDT-PERP") == "APE"
         assert SymbolMapper.extract_base("BTC-USDC-PERP") == "BTC"
+        assert SymbolMapper.extract_base("AI-USDT-SPOT") == "AI"
 
     def test_extract_base_invalid(self):
         assert SymbolMapper.extract_base("BTCUSDT") is None
@@ -222,6 +240,7 @@ class TestQuoteEquivalence:
     def test_extract_quote(self):
         assert SymbolMapper.extract_quote("APE-USDT-PERP") == "USDT"
         assert SymbolMapper.extract_quote("BTC-USDC-PERP") == "USDC"
+        assert SymbolMapper.extract_quote("AI-USDT-SPOT") == "USDT"
 
     def test_quotes_equivalent_same(self):
         assert SymbolMapper.are_quotes_equivalent("USDT", "USDT") is True
@@ -290,6 +309,25 @@ class TestMatchablePairs:
             base_a = SymbolMapper.extract_base(p["canonical_a"])
             base_b = SymbolMapper.extract_base(p["canonical_b"])
             assert base_a == base_b
+
+    def test_spot_matches_perp_same_base(self):
+        mapper = SymbolMapper(exchanges=["binance_spot", "gate"])
+        mapper.load_static("binance_spot", {
+            "AIUSDT": "AI-USDT-SPOT",
+        })
+        mapper.load_static("gate", {
+            "AI_USDT": "AI-USDT-PERP",
+        })
+
+        pairs = mapper.get_matchable_pairs()
+
+        assert pairs == [{
+            "base": "AI",
+            "exchange_a": "binance_spot",
+            "canonical_a": "AI-USDT-SPOT",
+            "exchange_b": "gate",
+            "canonical_b": "AI-USDT-PERP",
+        }]
 
 
 class TestBootstrapRetries:

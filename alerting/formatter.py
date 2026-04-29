@@ -16,7 +16,7 @@ from decimal import Decimal
 from models.snapshot import MarketSnapshot, SpreadOpportunity
 from pump_detector.models import PumpAlert
 from utils.exchange_links import futures_url, supported_exchanges
-from utils.venues import display_exchange, is_dex_exchange
+from utils.venues import display_exchange, is_dex_exchange, is_spot_exchange
 
 # Characters that must be escaped in MarkdownV2
 # https://core.telegram.org/bots/api#markdownv2-style
@@ -282,7 +282,7 @@ def format_grouped_alert(
 
     funding_parts = []
     for ex in sorted(all_ex_set):
-        if is_dex_exchange(ex):
+        if is_dex_exchange(ex) or is_spot_exchange(ex):
             continue
         snap = all_snapshots.get(ex) if all_snapshots else None
         mins = _next_funding_minutes(ex, snap)
@@ -296,8 +296,16 @@ def format_grouped_alert(
     sell_price = f"{float(best.sell_bid):.{prec}f}"
     buy_vol = _fmt_vol(best.buy_volume_24h)
     sell_vol = _fmt_vol(best.sell_volume_24h)
-    buy_fund = "spot" if is_dex_exchange(best.buy_exchange) else _fmt_funding_short(best.buy_funding_rate)
-    sell_fund = "spot" if is_dex_exchange(best.sell_exchange) else _fmt_funding_short(best.sell_funding_rate)
+    buy_fund = (
+        "spot"
+        if is_dex_exchange(best.buy_exchange) or is_spot_exchange(best.buy_exchange)
+        else _fmt_funding_short(best.buy_funding_rate)
+    )
+    sell_fund = (
+        "spot"
+        if is_dex_exchange(best.sell_exchange) or is_spot_exchange(best.sell_exchange)
+        else _fmt_funding_short(best.sell_funding_rate)
+    )
     buy_label = display_exchange(best.buy_exchange)
     sell_label = display_exchange(best.sell_exchange)
 
@@ -584,8 +592,9 @@ def _build_exchange_rows(
                 price_f = float(snap.ask)
             price_str = f"{price_f:.{prec}f}"
             vol_str = _fmt_vol(snap.volume_24h)
-            fund_str = "spot" if is_dex_exchange(ex) else _fmt_funding_short(snap.funding_rate)
-            tfund_str = "—" if is_dex_exchange(ex) else _fmt_minutes(_next_funding_minutes(ex, snap))
+            is_spot_like = is_dex_exchange(ex) or is_spot_exchange(ex)
+            fund_str = "spot" if is_spot_like else _fmt_funding_short(snap.funding_rate)
+            tfund_str = "—" if is_spot_like else _fmt_minutes(_next_funding_minutes(ex, snap))
 
             if ex == sell_ex:
                 spread_str = "sell"
@@ -629,8 +638,9 @@ def _build_exchange_rows(
 
                 price_str = f"{price_f:.{prec}f}"
                 vol_str = _fmt_vol(vol)
-                fund_str = "spot" if is_dex_exchange(ex) else _fmt_funding_short(fund)
-                tfund_str = "—" if is_dex_exchange(ex) else _fmt_minutes(_next_funding_minutes(ex))
+                is_spot_like = is_dex_exchange(ex) or is_spot_exchange(ex)
+                fund_str = "spot" if is_spot_like else _fmt_funding_short(fund)
+                tfund_str = "—" if is_spot_like else _fmt_minutes(_next_funding_minutes(ex))
 
                 if ex == sell_ex:
                     spread_str = "sell"

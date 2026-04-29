@@ -12,7 +12,7 @@ import time
 from decimal import Decimal
 
 from models.snapshot import SpreadOpportunity
-from utils.venues import is_dex_exchange
+from utils.venues import is_dex_exchange, is_spot_exchange
 
 
 class FilterResult:
@@ -54,6 +54,16 @@ def check_dex_enabled(opp: SpreadOpportunity, enabled: bool) -> FilterResult:
     if (is_dex_exchange(opp.buy_exchange) or is_dex_exchange(opp.sell_exchange)) and not enabled:
         return FilterResult(False, "dex_enabled", "dex alerts disabled")
     return FilterResult(True, "dex_enabled")
+
+
+def check_spot_enabled(opp: SpreadOpportunity, enabled: bool) -> FilterResult:
+    """Reject spot routes when spot-futures alerting is disabled at runtime."""
+    if (
+        is_spot_exchange(opp.buy_exchange)
+        or is_spot_exchange(opp.sell_exchange)
+    ) and not enabled:
+        return FilterResult(False, "spot_enabled", "spot-futures alerts disabled")
+    return FilterResult(True, "spot_enabled")
 
 
 def check_min_bid_size(opp: SpreadOpportunity, min_size: Decimal) -> FilterResult:
@@ -120,6 +130,33 @@ def check_min_dex_volume(opp: SpreadOpportunity, min_volume: Decimal | None) -> 
             f"dex_volume_24h={dex_volume} < {min_volume}",
         )
     return FilterResult(True, "min_dex_volume")
+
+
+def check_min_spot_volume(opp: SpreadOpportunity, min_volume: Decimal | None) -> FilterResult:
+    """
+    Reject spot routes whose spot-side 24h volume is below threshold.
+
+    Missing spot volume is accepted unless a threshold is explicitly configured.
+    """
+    if min_volume is None:
+        return FilterResult(True, "min_spot_volume")
+
+    if is_spot_exchange(opp.buy_exchange):
+        spot_volume = opp.buy_volume_24h
+    elif is_spot_exchange(opp.sell_exchange):
+        spot_volume = opp.sell_volume_24h
+    else:
+        return FilterResult(True, "min_spot_volume")
+
+    if spot_volume is None:
+        return FilterResult(False, "min_spot_volume", "spot_volume_24h missing")
+    if spot_volume < min_volume:
+        return FilterResult(
+            False,
+            "min_spot_volume",
+            f"spot_volume_24h={spot_volume} < {min_volume}",
+        )
+    return FilterResult(True, "min_spot_volume")
 
 
 def check_max_data_age(opp: SpreadOpportunity, max_age_ms: int) -> FilterResult:

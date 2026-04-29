@@ -14,10 +14,10 @@ from pydantic import BaseModel, Field, computed_field
 
 class MarketSnapshot(BaseModel, frozen=True):
     """
-    A single point-in-time view of one perpetual futures market on one exchange.
+    A single point-in-time view of one market on one venue.
 
-    Every exchange adapter normalizes its raw data into this schema before
-    passing it downstream to the spread engine.
+    Futures adapters use canonical symbols ending in PERP. Spot adapters use
+    canonical symbols ending in SPOT.
     """
 
     # Canonical symbol in {BASE}-{QUOTE}-PERP format (e.g. "BTC-USDT-PERP")
