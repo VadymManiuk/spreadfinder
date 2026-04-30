@@ -211,3 +211,14 @@ class TestSnapshotEmission:
         assert snap.bid == Decimal("1.2340")
         # First ask level: 1.2350, not second: 1.2360
         assert snap.ask == Decimal("1.2350")
+
+    @pytest.mark.asyncio
+    async def test_disconnect_awaits_meta_task(self, adapter):
+        """Meta polling task should not outlive the HTTP session on reconnect."""
+        task = asyncio.create_task(asyncio.sleep(60))
+        adapter._meta_task = task
+
+        await adapter._disconnect()
+
+        assert task.done()
+        assert adapter._meta_task is None

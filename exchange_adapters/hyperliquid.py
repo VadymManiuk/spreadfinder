@@ -92,7 +92,7 @@ class HyperliquidAdapter(BaseExchangeAdapter):
     async def _disconnect(self) -> None:
         """Close WebSocket and HTTP session."""
         if self._meta_task:
-            self._meta_task.cancel()
+            await self._cancel_tasks([self._meta_task])
             self._meta_task = None
         if self._ws:
             await self._ws.close()
@@ -184,6 +184,8 @@ class HyperliquidAdapter(BaseExchangeAdapter):
         while self._running:
             try:
                 await self._fetch_meta()
+            except asyncio.CancelledError:
+                break
             except Exception:
                 self._log.exception("meta_poll_error")
             await asyncio.sleep(META_POLL_INTERVAL_SECONDS)
@@ -197,7 +199,7 @@ class HyperliquidAdapter(BaseExchangeAdapter):
           assetCtx: {"funding": "0.00010000", "markPx": "50005.0",
                      "oraclePx": "50003.0", "dayNtlVlm": "500000000", ...}
         """
-        if not self._http_session:
+        if not self._http_session or self._http_session.closed:
             return
 
         async with self._http_session.post(
