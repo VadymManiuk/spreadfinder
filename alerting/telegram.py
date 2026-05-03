@@ -42,7 +42,7 @@ BOTTOM_MENU_KEYBOARD = {
     "keyboard": [
         [{"text": "⚙️ Spread"}, {"text": "🧬 DEX"}],
         [{"text": "🚀 Pump"}, {"text": "📊 Status"}],
-        [{"text": "❓ Help"}],
+        [{"text": "🚫 Excluded"}, {"text": "❓ Help"}],
     ],
     "resize_keyboard": True,
     "is_persistent": True,
@@ -104,6 +104,7 @@ class TelegramSender:
         session: aiohttp.ClientSession | None = None,
         allow_default_env: bool = True,
         ui_state_file: str | None = None,
+        excluded_tickers_file: str | None = None,
     ):
         default_bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "") if allow_default_env else ""
         default_chat_id = os.getenv("TELEGRAM_CHAT_ID", "") if allow_default_env else ""
@@ -122,11 +123,16 @@ class TelegramSender:
         self._chat_filters: dict[str, float] = {}
         self._default_min_pct: float = 1.0
         self._filter_file = os.path.join(os.path.dirname(__file__), "..", ".chat_filters.json")
+        self._excluded_tickers_file = excluded_tickers_file or os.path.join(
+            os.path.dirname(__file__), "..", ".excluded_tickers.json"
+        )
+        self._excluded_tickers: dict[str, list[str]] = {}
         self._ui_state_file = ui_state_file or os.path.join(
             os.path.dirname(__file__), "..", ".telegram_ui_state.json"
         )
         self._startup_message_sent_chat_ids: set[str] = set()
         self._load_filters()
+        self._load_excluded_tickers()
         self._load_ui_state()
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -174,6 +180,107 @@ class TelegramSender:
                 json.dump(self._chat_filters, f)
         except Exception:
             logger.exception("filter_save_error")
+
+    # ------------------------------------------------------------------
+    # Per-chat ticker exclusions
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _normalize_ticker(ticker: str) -> str:
+        """Normalize a user-provided ticker to the stored uppercase base symbol."""
+        return ticker.strip().upper().lstrip("$")
+
+    @staticmethod
+    def _base_from_symbol(canonical_symbol: str) -> str:
+        """Extract base token from a canonical symbol."""
+        return canonical_symbol.split("-", 1)[0] if "-" in canonical_symbol else canonical_symbol
+
+    def get_excluded_tickers(self, chat_id: str | None = None) -> list[str]:
+        """Return sorted excluded tickers for a chat."""
+        cid = chat_id or self.chat_id
+        return sorted(set(self._excluded_tickers.get(cid, [])))
+
+    def is_ticker_excluded(self, ticker: str, chat_id: str | None = None) -> bool:
+        """Return whether a ticker is excluded for this chat."""
+        cid = chat_id or self.chat_id
+        normalized = self._normalize_ticker(ticker)
+        return normalized in set(self._excluded_tickers.get(cid, []))
+
+    def exclude_ticker(self, ticker: str, chat_id: str | None = None) -> str | None:
+        """Exclude a ticker for a chat and persist it. Returns normalized ticker."""
+        cid = chat_id or self.chat_id
+        normalized = self._normalize_ticker(ticker)
+        if not normalized:
+            return None
+        current = set(self._excluded_tickers.get(cid, []))
+        current.add(normalized)
+        self._excluded_tickers[cid] = sorted(current)
+        self._save_excluded_tickers()
+        logger.info("ticker_excluded", chat_id=cid, ticker=normalized)
+        return normalized
+
+    def include_ticker(self, ticker: str, chat_id: str | None = None) -> str | None:
+        """Remove a ticker exclusion for a chat and persist it."""
+        cid = chat_id or self.chat_id
+        normalized = self._normalize_ticker(ticker)
+        if not normalized:
+            return None
+        current = set(self._excluded_tickers.get(cid, []))
+        current.discard(normalized)
+        if current:
+            self._excluded_tickers[cid] = sorted(current)
+        else:
+            self._excluded_tickers.pop(cid, None)
+        self._save_excluded_tickers()
+        logger.info("ticker_included", chat_id=cid, ticker=normalized)
+        return normalized
+
+    def passes_ticker_exclusion(
+        self, opp: SpreadOpportunity, chat_id: str | None = None
+    ) -> bool:
+        """Check if an opportunity is allowed by the chat's ticker exclusions."""
+        base = self._base_from_symbol(opp.canonical_symbol)
+        allowed = not self.is_ticker_excluded(base, chat_id)
+        if not allowed:
+            logger.debug(
+                "ticker_exclusion_rejected",
+                symbol=opp.canonical_symbol,
+                base=base,
+                chat_id=chat_id or self.chat_id,
+            )
+        return allowed
+
+    def _load_excluded_tickers(self) -> None:
+        """Load saved ticker exclusions from disk."""
+        try:
+            if os.path.exists(self._excluded_tickers_file):
+                with open(self._excluded_tickers_file, "r") as f:
+                    raw = json.load(f)
+                if not isinstance(raw, dict):
+                    return
+                loaded: dict[str, list[str]] = {}
+                for chat_id, tickers in raw.items():
+                    if not isinstance(tickers, list):
+                        continue
+                    normalized = {
+                        value
+                        for item in tickers
+                        if (value := self._normalize_ticker(str(item)))
+                    }
+                    if normalized:
+                        loaded[str(chat_id)] = sorted(normalized)
+                self._excluded_tickers = loaded
+                logger.info("excluded_tickers_loaded", exclusions=self._excluded_tickers)
+        except Exception:
+            logger.exception("excluded_tickers_load_error")
+
+    def _save_excluded_tickers(self) -> None:
+        """Persist ticker exclusions so they survive restarts."""
+        try:
+            with open(self._excluded_tickers_file, "w") as f:
+                json.dump(self._excluded_tickers, f)
+        except Exception:
+            logger.exception("excluded_tickers_save_error")
 
     def _load_ui_state(self) -> None:
         """Load Telegram UI state that should survive process restarts."""
@@ -265,6 +372,37 @@ class TelegramSender:
 
         return rows
 
+    def _build_alert_keyboard(self, base: str) -> list[list[dict]]:
+        """Build per-alert controls for muting a noisy ticker."""
+        normalized = self._normalize_ticker(base)
+        if not normalized:
+            return []
+        return [[
+            {
+                "text": f"🚫 Exclude {normalized}",
+                "callback_data": f"exclude:{normalized}",
+            }
+        ]]
+
+    def _build_exclusions_keyboard(self, chat_id: str | None = None) -> list[list[dict]]:
+        """Build inline buttons for removing ticker exclusions."""
+        tickers = self.get_excluded_tickers(chat_id)
+        rows: list[list[dict]] = []
+        row: list[dict] = []
+        for ticker in tickers:
+            row.append({
+                "text": f"✅ Allow {ticker}",
+                "callback_data": f"include:{ticker}",
+            })
+            if len(row) == 2:
+                rows.append(row)
+                row = []
+        if row:
+            rows.append(row)
+        if rows:
+            rows.append([{"text": "🔄 Refresh", "callback_data": "excluded_refresh:1"}])
+        return rows
+
     # ------------------------------------------------------------------
     # Sending alerts
     # ------------------------------------------------------------------
@@ -277,10 +415,12 @@ class TelegramSender:
 
         if not self.passes_filter(opp):
             return False
+        if not self.passes_ticker_exclusion(opp):
+            return False
 
         message = format_alert(opp)
-        # No inline keyboard on alerts — settings are in /filter panel only
-        return await self._send_message(message)
+        base = self._base_from_symbol(opp.canonical_symbol)
+        return await self._send_message(message, self._build_alert_keyboard(base))
 
     async def send_grouped_alert(
         self,
@@ -296,8 +436,12 @@ class TelegramSender:
         if not self._is_configured():
             return False
 
-        # Filter: only routes that pass the chat's min spread filter
-        passing = [o for o in opps if self.passes_filter(o)]
+        # Filter: only routes that pass the chat's spread filter and ticker exclusions.
+        passing = [
+            o
+            for o in opps
+            if self.passes_filter(o) and self.passes_ticker_exclusion(o)
+        ]
         if not passing:
             return False
 
@@ -309,7 +453,8 @@ class TelegramSender:
             deposit_status=deposit_status,
             all_snapshots=all_snapshots,
         )
-        return await self._send_message(message)
+        base = self._base_from_symbol(passing[0].canonical_symbol)
+        return await self._send_message(message, self._build_alert_keyboard(base))
 
     async def send_pump_alert(self, alert: PumpAlert) -> bool:
         """Send a pump/dump price alert. Bypasses spread % filter."""
@@ -469,6 +614,7 @@ class TelegramSender:
             f"Flush errors:   {diag['flush_errors']:,}\n"
             f"Last alert:     {last_spread_str} {last_spread_sym}\n"
             f"TG filter:      > {current:g}%\n\n"
+            f"Excluded:       {len(self.get_excluded_tickers(cid)):,} tickers\n\n"
             f"── DEX Alerts ──\n"
             f"Sent:           {diag.get('dex_spreads_sent', 0):,}\n"
             f"Bad direction:  {diag.get('dex_rejected_direction', 0):,}\n"
@@ -508,6 +654,9 @@ class TelegramSender:
         commands = [
             {"command": "filter", "description": "Open spread filter panel"},
             {"command": "setmin", "description": "Set minimum spread % (e.g. /setmin 2.5)"},
+            {"command": "excluded", "description": "Show excluded ticker list"},
+            {"command": "exclude", "description": "Exclude a ticker (e.g. /exclude VANRY)"},
+            {"command": "include", "description": "Allow an excluded ticker (e.g. /include VANRY)"},
             {"command": "dex", "description": "Open DEX alert panel"},
             {"command": "setdex", "description": "Set min DEX net spread % (e.g. /setdex 10)"},
             {"command": "setdexvol", "description": "Set min DEX 24h vol (e.g. /setdexvol 2000000)"},
@@ -649,6 +798,10 @@ class TelegramSender:
             except (ValueError, IndexError):
                 await self._answer_callback(callback_id, "Invalid filter")
 
+        elif data.startswith("exclude:"):
+            await self._handle_exclude_callback(data, callback, callback_id, chat_id)
+        elif data.startswith("include:") or data.startswith("excluded_refresh:"):
+            await self._handle_include_callback(data, callback, callback_id, chat_id)
         elif data.startswith("dex_"):
             await self._handle_dex_callback(data, callback, callback_id, chat_id)
         elif data.startswith("pump_"):
@@ -668,6 +821,8 @@ class TelegramSender:
             await self._send_pump_panel(chat_id)
         elif text == "📊 Status":
             await self._send_status(chat_id)
+        elif text == "🚫 Excluded":
+            await self._send_exclusions_panel(chat_id)
         elif text == "❓ Help":
             await self._send_welcome(chat_id)
         # Slash commands
@@ -675,6 +830,12 @@ class TelegramSender:
             await self._handle_setmin(text, chat_id)
         elif text.startswith("/filter") or text.startswith("/settings"):
             await self._send_filter_status(chat_id)
+        elif text.startswith("/excluded"):
+            await self._send_exclusions_panel(chat_id)
+        elif text.startswith("/exclude"):
+            await self._handle_exclude_command(text, chat_id)
+        elif text.startswith("/include") or text.startswith("/allow"):
+            await self._handle_include_command(text, chat_id)
         elif text.startswith("/setdexvol"):
             await self._handle_setdexvol(text, chat_id)
         elif text.startswith("/setdex"):
@@ -747,6 +908,154 @@ class TelegramSender:
                 f"❌ Invalid number: {parts[1]}\n"
                 "Usage: /setmin 2.5"
             )
+
+    # ------------------------------------------------------------------
+    # /exclude commands and alert buttons
+    # ------------------------------------------------------------------
+
+    async def _handle_exclude_callback(
+        self, data: str, callback: dict, callback_id: str, chat_id: str
+    ) -> None:
+        """Handle the Exclude button attached to spread alerts."""
+        try:
+            _, raw_ticker = data.split(":", 1)
+        except ValueError:
+            await self._answer_callback(callback_id, "Bad data")
+            return
+
+        ticker = self.exclude_ticker(raw_ticker, chat_id)
+        if ticker is None:
+            await self._answer_callback(callback_id, "Bad ticker")
+            return
+
+        await self._answer_callback(callback_id, f"{ticker} excluded")
+
+        msg = callback.get("message", {})
+        msg_id = msg.get("message_id")
+        msg_chat_id = str(msg.get("chat", {}).get("id", chat_id))
+        if msg_id:
+            await self._edit_message_reply_markup(
+                msg_chat_id,
+                msg_id,
+                [[{
+                    "text": f"↩️ Undo exclude {ticker}",
+                    "callback_data": f"include:{ticker}",
+                }]],
+            )
+
+    async def _handle_include_callback(
+        self, data: str, callback: dict, callback_id: str, chat_id: str
+    ) -> None:
+        """Handle allow/refresh buttons from exclusion controls."""
+        if data.startswith("excluded_refresh:"):
+            await self._answer_callback(callback_id, "Refreshed")
+        else:
+            try:
+                _, raw_ticker = data.split(":", 1)
+            except ValueError:
+                await self._answer_callback(callback_id, "Bad data")
+                return
+
+            ticker = self.include_ticker(raw_ticker, chat_id)
+            if ticker is None:
+                await self._answer_callback(callback_id, "Bad ticker")
+                return
+            await self._answer_callback(callback_id, f"{ticker} allowed")
+
+        msg = callback.get("message", {})
+        msg_id = msg.get("message_id")
+        msg_chat_id = str(msg.get("chat", {}).get("id", chat_id))
+        if msg_id:
+            await self._edit_exclusions_panel(msg_chat_id, msg_id)
+
+    async def _handle_exclude_command(self, text: str, chat_id: str) -> None:
+        """Handle /exclude TICKER."""
+        parts = text.split()
+        if len(parts) < 2:
+            await self._send_plain(
+                chat_id,
+                "Usage: /exclude VANRY\n\n"
+                "This stops spread alerts for that ticker until you allow it again."
+            )
+            return
+        ticker = self.exclude_ticker(parts[1], chat_id)
+        if ticker is None:
+            await self._send_plain(chat_id, "❌ Invalid ticker")
+            return
+        await self._send_plain(chat_id, f"✅ {ticker} excluded from spread alerts")
+
+    async def _handle_include_command(self, text: str, chat_id: str) -> None:
+        """Handle /include TICKER."""
+        parts = text.split()
+        if len(parts) < 2:
+            await self._send_plain(
+                chat_id,
+                "Usage: /include VANRY\n\n"
+                "Use /excluded to see the current exclusion list."
+            )
+            return
+        ticker = self.include_ticker(parts[1], chat_id)
+        if ticker is None:
+            await self._send_plain(chat_id, "❌ Invalid ticker")
+            return
+        await self._send_plain(chat_id, f"✅ {ticker} allowed again")
+
+    def _exclusions_panel_text(self, chat_id: str | None = None) -> str:
+        """Build the text for the excluded ticker panel."""
+        tickers = self.get_excluded_tickers(chat_id)
+        if not tickers:
+            return (
+                "🚫 Excluded Tickers\n\n"
+                "No tickers are excluded.\n\n"
+                "Tap Exclude under an alert, or type /exclude VANRY."
+            )
+        ticker_lines = "\n".join(f"  • {ticker}" for ticker in tickers)
+        return (
+            "🚫 Excluded Tickers\n\n"
+            f"{ticker_lines}\n\n"
+            "Tap a button below to allow a ticker again."
+        )
+
+    async def _send_exclusions_panel(self, chat_id: str | None = None) -> None:
+        """Send the excluded ticker management panel."""
+        cid = chat_id or self.chat_id
+        keyboard = self._build_exclusions_keyboard(cid)
+        url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/sendMessage"
+        payload: dict = {
+            "chat_id": cid,
+            "text": self._exclusions_panel_text(cid),
+        }
+        if keyboard:
+            payload["reply_markup"] = {"inline_keyboard": keyboard}
+
+        try:
+            session = await self._get_session()
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.warning("exclusions_panel_failed", status=resp.status, body=body[:200])
+        except Exception:
+            logger.exception("exclusions_panel_error")
+
+    async def _edit_exclusions_panel(self, chat_id: str, message_id: int) -> None:
+        """Edit an existing excluded ticker panel in place."""
+        keyboard = self._build_exclusions_keyboard(chat_id)
+        url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/editMessageText"
+        payload: dict = {
+            "chat_id": chat_id,
+            "message_id": message_id,
+            "text": self._exclusions_panel_text(chat_id),
+        }
+        if keyboard:
+            payload["reply_markup"] = {"inline_keyboard": keyboard}
+        try:
+            session = await self._get_session()
+            async with session.post(url, json=payload) as resp:
+                if resp.status != 200:
+                    body = await resp.text()
+                    logger.debug("exclusions_panel_edit_failed", status=resp.status, body=body[:200])
+        except Exception:
+            logger.exception("exclusions_panel_edit_error")
 
     # ------------------------------------------------------------------
     # /dex commands
@@ -1244,12 +1553,16 @@ class TelegramSender:
             "Commands:\n"
             f"  /setmin <percent>  — Set minimum spread (current: {current:g}%)\n"
             "  /filter  — Show filter panel with buttons\n"
+            "  /exclude <ticker>  — Stop alerts for a ticker\n"
+            "  /include <ticker>  — Allow an excluded ticker again\n"
+            "  /excluded  — Show excluded ticker list\n"
             "  /dex     — Show DEX alert panel\n"
             "  /setdex <percent>  — Set DEX min net spread\n"
             "  /setdexvol <usd>   — Set DEX min 24h volume\n"
             "  /help    — Show this message\n\n"
             "Examples:\n"
             "  /setmin 3    — only alert if spread > 3%\n"
+            "  /exclude VANRY  — mute VANRY spread alerts\n"
             "  /setdex 10   — DEX alerts only if net spread > 10%\n"
             "  /setdexvol 2000000  — DEX alerts only if vol > $2M\n"
             "  /setmin 0    — show all alerts"
@@ -1301,9 +1614,13 @@ class TelegramSender:
         except Exception:
             logger.exception("callback_answer_error")
 
-    async def _update_keyboard(self, chat_id: str, message_id: int, user_chat_id: str) -> None:
-        """Update inline keyboard on existing message."""
-        keyboard = self._build_filter_keyboard(user_chat_id)
+    async def _edit_message_reply_markup(
+        self,
+        chat_id: str,
+        message_id: int,
+        keyboard: list[list[dict]],
+    ) -> None:
+        """Replace inline buttons on an existing Telegram message."""
         url = f"{TELEGRAM_API_BASE}/bot{self.bot_token}/editMessageReplyMarkup"
         payload = {
             "chat_id": chat_id,
@@ -1314,9 +1631,14 @@ class TelegramSender:
             session = await self._get_session()
             async with session.post(url, json=payload) as resp:
                 if resp.status != 200:
-                    logger.debug("keyboard_update_failed", status=resp.status)
+                    logger.debug("reply_markup_edit_failed", status=resp.status)
         except Exception:
-            logger.exception("keyboard_update_error")
+            logger.exception("reply_markup_edit_error")
+
+    async def _update_keyboard(self, chat_id: str, message_id: int, user_chat_id: str) -> None:
+        """Update inline keyboard on existing message."""
+        keyboard = self._build_filter_keyboard(user_chat_id)
+        await self._edit_message_reply_markup(chat_id, message_id, keyboard)
 
     # ------------------------------------------------------------------
     # Rate limiting & lifecycle
