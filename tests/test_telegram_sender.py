@@ -133,6 +133,18 @@ def test_excluded_ticker_persists_and_filters(tmp_path):
     assert loaded.get_excluded_tickers() == ["VANRY"]
 
 
+def test_invalid_excluded_ticker_is_rejected(tmp_path):
+    sender = TelegramSender(
+        bot_token="token",
+        chat_id="12345",
+        allow_default_env=False,
+        excluded_tickers_file=str(tmp_path / "excluded_tickers.json"),
+    )
+
+    assert sender.exclude_ticker("BAD TICKER") is None
+    assert sender.get_excluded_tickers() == []
+
+
 @pytest.mark.asyncio
 async def test_grouped_alert_has_exclude_button_and_respects_exclusions(tmp_path, monkeypatch):
     sender = TelegramSender(
@@ -180,3 +192,51 @@ async def test_exclude_callback_adds_ticker_and_replaces_button(tmp_path, monkey
         99,
         [[{"text": "↩️ Undo exclude VANRY", "callback_data": "include:VANRY"}]],
     )
+
+
+@pytest.mark.asyncio
+async def test_excluded_panel_add_button_adds_next_ticker_message(tmp_path, monkeypatch):
+    sender = TelegramSender(
+        bot_token="token",
+        chat_id="12345",
+        allow_default_env=False,
+        excluded_tickers_file=str(tmp_path / "excluded_tickers.json"),
+    )
+    answer = AsyncMock()
+    send_plain = AsyncMock(return_value=True)
+    send_panel = AsyncMock()
+    monkeypatch.setattr(sender, "_answer_callback", answer)
+    monkeypatch.setattr(sender, "_send_plain", send_plain)
+    monkeypatch.setattr(sender, "_send_exclusions_panel", send_panel)
+
+    await sender._handle_callback({
+        "id": "callback-1",
+        "data": "excluded_add:1",
+        "from": {"id": 12345},
+        "message": {"message_id": 99, "chat": {"id": "12345"}},
+    })
+
+    assert "12345" in sender._pending_exclusion_chat_ids
+    answer.assert_awaited_once_with("callback-1", "Type ticker")
+
+    await sender._handle_message({
+        "chat": {"id": "12345"},
+        "text": "aia",
+    })
+
+    assert sender.get_excluded_tickers("12345") == ["AIA"]
+    assert "12345" not in sender._pending_exclusion_chat_ids
+    send_panel.assert_awaited_once_with("12345")
+
+
+def test_excluded_keyboard_always_has_add_button(tmp_path):
+    sender = TelegramSender(
+        bot_token="token",
+        chat_id="12345",
+        allow_default_env=False,
+        excluded_tickers_file=str(tmp_path / "excluded_tickers.json"),
+    )
+
+    keyboard = sender._build_exclusions_keyboard("12345")
+
+    assert keyboard[0] == [{"text": "➕ Add ticker", "callback_data": "excluded_add:1"}]

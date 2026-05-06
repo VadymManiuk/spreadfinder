@@ -117,6 +117,7 @@ class TelegramSender:
         self._lock = asyncio.Lock()
         self._polling_task: asyncio.Task | None = None
         self._last_update_id: int = 0
+        self._pending_exclusion_chat_ids: set[str] = set()
 
         # Per-chat filter: chat_id -> min net spread in % (e.g. 1.0 = 1%)
         # Default: 1% minimum
@@ -190,6 +191,12 @@ class TelegramSender:
         """Normalize a user-provided ticker to the stored uppercase base symbol."""
         return ticker.strip().upper().lstrip("$")
 
+    @classmethod
+    def _is_valid_ticker(cls, ticker: str) -> bool:
+        """Return whether a normalized base ticker is safe to store."""
+        normalized = cls._normalize_ticker(ticker)
+        return bool(normalized) and normalized.isalnum() and len(normalized) <= 30
+
     @staticmethod
     def _base_from_symbol(canonical_symbol: str) -> str:
         """Extract base token from a canonical symbol."""
@@ -210,7 +217,7 @@ class TelegramSender:
         """Exclude a ticker for a chat and persist it. Returns normalized ticker."""
         cid = chat_id or self.chat_id
         normalized = self._normalize_ticker(ticker)
-        if not normalized:
+        if not self._is_valid_ticker(normalized):
             return None
         current = set(self._excluded_tickers.get(cid, []))
         current.add(normalized)
@@ -223,7 +230,7 @@ class TelegramSender:
         """Remove a ticker exclusion for a chat and persist it."""
         cid = chat_id or self.chat_id
         normalized = self._normalize_ticker(ticker)
-        if not normalized:
+        if not self._is_valid_ticker(normalized):
             return None
         current = set(self._excluded_tickers.get(cid, []))
         current.discard(normalized)
@@ -385,9 +392,11 @@ class TelegramSender:
         ]]
 
     def _build_exclusions_keyboard(self, chat_id: str | None = None) -> list[list[dict]]:
-        """Build inline buttons for removing ticker exclusions."""
+        """Build inline buttons for adding/removing ticker exclusions."""
         tickers = self.get_excluded_tickers(chat_id)
-        rows: list[list[dict]] = []
+        rows: list[list[dict]] = [
+            [{"text": "➕ Add ticker", "callback_data": "excluded_add:1"}]
+        ]
         row: list[dict] = []
         for ticker in tickers:
             row.append({
@@ -399,8 +408,7 @@ class TelegramSender:
                 row = []
         if row:
             rows.append(row)
-        if rows:
-            rows.append([{"text": "🔄 Refresh", "callback_data": "excluded_refresh:1"}])
+        rows.append([{"text": "🔄 Refresh", "callback_data": "excluded_refresh:1"}])
         return rows
 
     # ------------------------------------------------------------------
@@ -800,6 +808,8 @@ class TelegramSender:
 
         elif data.startswith("exclude:"):
             await self._handle_exclude_callback(data, callback, callback_id, chat_id)
+        elif data.startswith("excluded_add:"):
+            await self._handle_exclusion_add_callback(callback, callback_id, chat_id)
         elif data.startswith("include:") or data.startswith("excluded_refresh:"):
             await self._handle_include_callback(data, callback, callback_id, chat_id)
         elif data.startswith("dex_"):
@@ -811,6 +821,10 @@ class TelegramSender:
         """Handle text messages, commands, and bottom menu button presses."""
         text = (message.get("text") or "").strip()
         chat_id = str(message.get("chat", {}).get("id", ""))
+
+        if self._is_pending_exclusion_text(text, chat_id):
+            await self._handle_pending_exclusion_text(text, chat_id)
+            return
 
         # Bottom menu button presses
         if text in ("⚙️ Spread", "⚙️ Settings"):
@@ -943,6 +957,18 @@ class TelegramSender:
                 }]],
             )
 
+    async def _handle_exclusion_add_callback(
+        self, callback: dict, callback_id: str, chat_id: str
+    ) -> None:
+        """Ask the user to type a ticker for the exclusion list."""
+        self._pending_exclusion_chat_ids.add(chat_id)
+        await self._answer_callback(callback_id, "Type ticker")
+        await self._send_plain(
+            chat_id,
+            "Type ticker to exclude, for example: VANRY\n\n"
+            "Send /cancel to stop."
+        )
+
     async def _handle_include_callback(
         self, data: str, callback: dict, callback_id: str, chat_id: str
     ) -> None:
@@ -967,6 +993,44 @@ class TelegramSender:
         msg_chat_id = str(msg.get("chat", {}).get("id", chat_id))
         if msg_id:
             await self._edit_exclusions_panel(msg_chat_id, msg_id)
+
+    def _is_pending_exclusion_text(self, text: str, chat_id: str) -> bool:
+        """Return whether this message should complete an add-to-excluded flow."""
+        if chat_id not in self._pending_exclusion_chat_ids:
+            return False
+        if text in (
+            "⚙️ Spread",
+            "⚙️ Settings",
+            "🧬 DEX",
+            "🚀 Pump",
+            "📊 Status",
+            "🚫 Excluded",
+            "❓ Help",
+        ):
+            self._pending_exclusion_chat_ids.discard(chat_id)
+            return False
+        return True
+
+    async def _handle_pending_exclusion_text(self, text: str, chat_id: str) -> None:
+        """Add the next user message as an excluded ticker."""
+        self._pending_exclusion_chat_ids.discard(chat_id)
+        if text.startswith("/cancel"):
+            await self._send_plain(chat_id, "Cancelled")
+            return
+        if text.startswith("/"):
+            await self._send_plain(chat_id, "Cancelled")
+            return
+
+        ticker = self.exclude_ticker(text, chat_id)
+        if ticker is None:
+            await self._send_plain(
+                chat_id,
+                "❌ Invalid ticker. Use letters/numbers only, for example: VANRY"
+            )
+            return
+
+        await self._send_plain(chat_id, f"✅ {ticker} added to Excluded")
+        await self._send_exclusions_panel(chat_id)
 
     async def _handle_exclude_command(self, text: str, chat_id: str) -> None:
         """Handle /exclude TICKER."""
@@ -1007,13 +1071,13 @@ class TelegramSender:
             return (
                 "🚫 Excluded Tickers\n\n"
                 "No tickers are excluded.\n\n"
-                "Tap Exclude under an alert, or type /exclude VANRY."
+                "Tap Add ticker, tap Exclude under an alert, or type /exclude VANRY."
             )
         ticker_lines = "\n".join(f"  • {ticker}" for ticker in tickers)
         return (
             "🚫 Excluded Tickers\n\n"
             f"{ticker_lines}\n\n"
-            "Tap a button below to allow a ticker again."
+            "Tap Add ticker to exclude another token, or allow a ticker again below."
         )
 
     async def _send_exclusions_panel(self, chat_id: str | None = None) -> None:
@@ -1025,8 +1089,7 @@ class TelegramSender:
             "chat_id": cid,
             "text": self._exclusions_panel_text(cid),
         }
-        if keyboard:
-            payload["reply_markup"] = {"inline_keyboard": keyboard}
+        payload["reply_markup"] = {"inline_keyboard": keyboard}
 
         try:
             session = await self._get_session()
@@ -1046,8 +1109,7 @@ class TelegramSender:
             "message_id": message_id,
             "text": self._exclusions_panel_text(chat_id),
         }
-        if keyboard:
-            payload["reply_markup"] = {"inline_keyboard": keyboard}
+        payload["reply_markup"] = {"inline_keyboard": keyboard}
         try:
             session = await self._get_session()
             async with session.post(url, json=payload) as resp:
