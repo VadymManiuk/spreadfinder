@@ -262,10 +262,10 @@ class SpreadScanner:
             )
             return None
 
-        if chat_id == self.settings.telegram.chat_id:
+        if bot_token == self.settings.telegram.bot_token:
             logger.warning(
                 "pump_telegram_sender_rejected",
-                reason="same_chat_as_spread_alerts",
+                reason="same_bot_as_spread_alerts",
                 chat_id=chat_id,
             )
             return None

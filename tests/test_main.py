@@ -118,7 +118,7 @@ def test_pump_alerts_require_dedicated_chat_id_for_secondary_bot():
     assert scanner._pump_telegram is None
 
 
-def test_pump_alerts_reject_main_chat_id_for_secondary_bot():
+def test_pump_alerts_allow_same_chat_id_when_secondary_bot_differs():
     scanner = SpreadScanner(
         Settings(
             enabled_exchanges=["binance"],
@@ -126,6 +126,23 @@ def test_pump_alerts_reject_main_chat_id_for_secondary_bot():
             pump_telegram=PumpTelegramSettings(
                 bot_token="pump-token",
                 chat_id="main-chat",
+            ),
+        )
+    )
+
+    assert scanner._pump_telegram is not None
+    assert scanner._pump_telegram.bot_token == "pump-token"
+    assert scanner._pump_telegram.chat_id == "main-chat"
+
+
+def test_pump_alerts_reject_main_bot_token_for_secondary_bot():
+    scanner = SpreadScanner(
+        Settings(
+            enabled_exchanges=["binance"],
+            telegram=TelegramSettings(bot_token="main-token", chat_id="main-chat"),
+            pump_telegram=PumpTelegramSettings(
+                bot_token="main-token",
+                chat_id="pump-chat",
             ),
         )
     )
