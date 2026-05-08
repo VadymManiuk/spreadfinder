@@ -118,6 +118,21 @@ def test_pump_alerts_require_dedicated_chat_id_for_secondary_bot():
     assert scanner._pump_telegram is None
 
 
+def test_pump_alerts_reject_main_chat_id_for_secondary_bot():
+    scanner = SpreadScanner(
+        Settings(
+            enabled_exchanges=["binance"],
+            telegram=TelegramSettings(bot_token="main-token", chat_id="main-chat"),
+            pump_telegram=PumpTelegramSettings(
+                bot_token="pump-token",
+                chat_id="main-chat",
+            ),
+        )
+    )
+
+    assert scanner._pump_telegram is None
+
+
 def test_route_kind_classifies_spot_futures_separately():
     scanner = _make_scanner(["binance", "gate"])
 
