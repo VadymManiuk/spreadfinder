@@ -250,10 +250,18 @@ class SpreadScanner:
         the main bot to avoid split runtime state.
         """
         bot_token = self.settings.pump_telegram.bot_token
-        if not bot_token:
+        chat_id = self.settings.pump_telegram.chat_id
+        if not bot_token and not chat_id:
             return None
 
-        chat_id = self.settings.pump_telegram.chat_id or self.settings.telegram.chat_id
+        if not bot_token or not chat_id:
+            logger.warning(
+                "pump_telegram_sender_incomplete",
+                has_bot_token=bool(bot_token),
+                has_chat_id=bool(chat_id),
+            )
+            return None
+
         sender = TelegramSender(
             bot_token=bot_token,
             chat_id=chat_id,
@@ -270,24 +278,33 @@ class SpreadScanner:
         )
         return None
 
-    def _pump_sender(self) -> TelegramSender:
-        """Return the active Telegram sender for pump/dump alerts."""
-        return self._pump_telegram or self._telegram
+    def _pump_sender(self) -> TelegramSender | None:
+        """Return the dedicated Telegram sender for pump/dump alerts, if configured."""
+        return self._pump_telegram
 
     async def _send_pump_alert(self, alert) -> bool:
         """
-        Send a pump/dump alert, falling back to the main bot if needed.
+        Send a pump/dump alert only to the dedicated pump Telegram destination.
 
-        This keeps alerts flowing while a newly configured secondary bot is not
-        yet started by the user or has no permission to write to the target chat.
+        The main Telegram chat is reserved for spread alerts. If a dedicated
+        pump destination is not configured or fails, do not fall back to main.
         """
         sender = self._pump_sender()
-        sent = await sender.send_pump_alert(alert)
-        if sent or self._pump_telegram is None or sender is self._telegram:
-            return sent
+        if sender is None:
+            logger.info(
+                "pump_alert_skipped",
+                base=alert.base,
+                reason="no_dedicated_pump_telegram",
+            )
+            return False
 
-        logger.warning("pump_telegram_send_failed_fallback_main")
-        return await self._telegram.send_pump_alert(alert)
+        sent = await sender.send_pump_alert(alert)
+        if not sent:
+            logger.warning(
+                "pump_telegram_send_failed_no_fallback",
+                base=alert.base,
+            )
+        return sent
 
     def _set_pump_enabled(self, enabled: bool) -> None:
         """Toggle pump alerts at runtime (called from /pumpon, /pumpoff)."""

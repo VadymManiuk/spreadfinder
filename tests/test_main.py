@@ -73,7 +73,7 @@ def test_bootstrap_health_allows_majority_of_exchanges_ready():
     scanner._validate_bootstrap_health()
 
 
-def test_pump_alerts_use_main_sender_by_default():
+def test_pump_alerts_do_not_use_main_sender_by_default():
     scanner = SpreadScanner(
         Settings(
             enabled_exchanges=["binance"],
@@ -82,7 +82,7 @@ def test_pump_alerts_use_main_sender_by_default():
         )
     )
 
-    assert scanner._pump_sender() is scanner._telegram
+    assert scanner._pump_sender() is None
 
 
 def test_pump_alerts_use_secondary_bot_when_configured():
@@ -103,7 +103,7 @@ def test_pump_alerts_use_secondary_bot_when_configured():
     assert scanner._pump_telegram.chat_id == "pump-chat"
 
 
-def test_pump_alerts_fall_back_to_main_chat_id_for_secondary_bot():
+def test_pump_alerts_require_dedicated_chat_id_for_secondary_bot():
     scanner = SpreadScanner(
         Settings(
             enabled_exchanges=["binance"],
@@ -115,8 +115,7 @@ def test_pump_alerts_fall_back_to_main_chat_id_for_secondary_bot():
         )
     )
 
-    assert scanner._pump_telegram is not None
-    assert scanner._pump_telegram.chat_id == "main-chat"
+    assert scanner._pump_telegram is None
 
 
 def test_route_kind_classifies_spot_futures_separately():
@@ -128,7 +127,40 @@ def test_route_kind_classifies_spot_futures_separately():
 
 
 @pytest.mark.asyncio
-async def test_pump_alert_send_falls_back_to_main_sender_on_secondary_failure():
+async def test_pump_alert_send_skips_when_dedicated_sender_missing():
+    scanner = SpreadScanner(Settings(enabled_exchanges=["binance"]))
+
+    class StubSender:
+        def __init__(self):
+            self.calls = 0
+
+        async def send_pump_alert(self, alert: PumpAlert) -> bool:
+            self.calls += 1
+            return True
+
+    scanner._telegram = StubSender()
+    scanner._pump_telegram = None
+
+    alert = PumpAlert(
+        base="ARIA",
+        direction="pump",
+        start_price=Decimal("1.0"),
+        current_price=Decimal("1.2"),
+        change_pct=Decimal("20.0"),
+        window_seconds=300,
+        start_ts=datetime.now(timezone.utc),
+        current_ts=datetime.now(timezone.utc),
+        triggered_on="binance",
+    )
+
+    sent = await scanner._send_pump_alert(alert)
+
+    assert sent is False
+    assert scanner._telegram.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_pump_alert_send_does_not_fallback_to_main_sender_on_secondary_failure():
     scanner = SpreadScanner(Settings(enabled_exchanges=["binance"]))
 
     class StubSender:
@@ -157,6 +189,6 @@ async def test_pump_alert_send_falls_back_to_main_sender_on_secondary_failure():
 
     sent = await scanner._send_pump_alert(alert)
 
-    assert sent is True
+    assert sent is False
     assert scanner._pump_telegram.calls == 1
-    assert scanner._telegram.calls == 1
+    assert scanner._telegram.calls == 0
