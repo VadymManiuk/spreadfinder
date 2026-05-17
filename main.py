@@ -158,7 +158,6 @@ class SpreadScanner:
         # to know which snapshots to compare for spreads.
         self._match_lookup: dict[tuple[str, str], list[tuple[str, str]]] = {}
         self._futures_by_base: dict[str, list[tuple[str, str]]] = {}
-        self._spot_by_base: dict[str, list[tuple[str, str]]] = {}
 
         # Alert batching: accumulate routes per base token, flush after window.
         # (route_kind, base_token) -> list of SpreadOpportunity
@@ -335,6 +334,25 @@ class SpreadScanner:
             return "spot_futures"
         return "perp"
 
+    def _build_cex_match_lookup(self, matchable: list[dict]) -> None:
+        """
+        Build the approved CEX comparison graph from mapper-vetted pairs.
+
+        Spot-spot routes are intentionally ignored, but spot-futures routes
+        remain here so they keep the same collision checks as futures-futures.
+        """
+        self._match_lookup.clear()
+        for pair in matchable:
+            if (
+                is_spot_exchange(pair["exchange_a"])
+                and is_spot_exchange(pair["exchange_b"])
+            ):
+                continue
+            key_a = (pair["exchange_a"], pair["canonical_a"])
+            key_b = (pair["exchange_b"], pair["canonical_b"])
+            self._match_lookup.setdefault(key_a, []).append(key_b)
+            self._match_lookup.setdefault(key_b, []).append(key_a)
+
     async def _on_snapshot(self, snapshot: MarketSnapshot) -> None:
         """
         Callback invoked by exchange adapters on each new market snapshot.
@@ -359,21 +377,14 @@ class SpreadScanner:
             return
         self._last_calc_time[key] = now
 
-        # Futures snapshots compare against the mapper-derived futures graph
-        # plus any spot venues for the same base. Spot and DEX snapshots compare
-        # only against futures venues; spot-spot routes are intentionally ignored.
+        # CEX snapshots compare only against mapper-approved counterparts.
+        # DEX snapshots still compare by base because DEX adapters already
+        # exclude collision-prone tickers before snapshots reach this point.
         if is_dex_exchange(snapshot.exchange):
             normalized_base = normalize_base(self._extract_base(snapshot.canonical_symbol))
             counterparts = self._futures_by_base.get(normalized_base, [])
-        elif is_spot_exchange(snapshot.exchange):
-            normalized_base = normalize_base(self._extract_base(snapshot.canonical_symbol))
-            counterparts = self._futures_by_base.get(normalized_base, [])
         else:
-            normalized_base = normalize_base(self._extract_base(snapshot.canonical_symbol))
-            counterparts = [
-                *self._match_lookup.get(key, []),
-                *self._spot_by_base.get(normalized_base, []),
-            ]
+            counterparts = self._match_lookup.get(key, [])
 
         for other_key in counterparts:
             other_snap = self._snapshots.get(other_key)
@@ -844,16 +855,7 @@ class SpreadScanner:
         # Step 1b: Build cross-quote matchable pairs (all tokens, no market cap filter)
         matchable = self._mapper.get_matchable_pairs()
 
-        for pair in matchable:
-            if (
-                is_spot_exchange(pair["exchange_a"])
-                or is_spot_exchange(pair["exchange_b"])
-            ):
-                continue
-            key_a = (pair["exchange_a"], pair["canonical_a"])
-            key_b = (pair["exchange_b"], pair["canonical_b"])
-            self._match_lookup.setdefault(key_a, []).append(key_b)
-            self._match_lookup.setdefault(key_b, []).append(key_a)
+        self._build_cex_match_lookup(matchable)
 
         # Futures base lookup used by DEX snapshots. We normalize bases here so
         # aliases like 1000CHEEMS and CHEEMS collapse to one comparison bucket.
@@ -863,14 +865,6 @@ class SpreadScanner:
                 normalized_base = normalize_base(self._extract_base(canonical))
                 key = (exchange, canonical)
                 self._futures_by_base.setdefault(normalized_base, []).append(key)
-
-        self._spot_by_base.clear()
-        if self.settings.spot.enabled:
-            for exchange in self.settings.spot.enabled_exchanges:
-                for canonical in self._mapper.get_exchange_symbols(exchange):
-                    normalized_base = normalize_base(self._extract_base(canonical))
-                    key = (exchange, canonical)
-                    self._spot_by_base.setdefault(normalized_base, []).append(key)
 
         logger.info(
             "matchable_symbols",

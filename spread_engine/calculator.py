@@ -17,7 +17,11 @@ import structlog
 
 from models.snapshot import MarketSnapshot, SpreadOpportunity
 from spread_engine.confidence import calculate_confidence
-from symbol_mapper.ticker_aliases import normalize_base
+from symbol_mapper.ticker_aliases import (
+    TICKER_COLLISIONS,
+    is_collision_pair_allowed,
+    normalize_base,
+)
 from utils.venues import exchange_family
 
 logger = structlog.get_logger(__name__)
@@ -194,6 +198,23 @@ def calculate_spread(
             symbol_b=snap_b.canonical_symbol,
             normalized_a=norm_a,
             normalized_b=norm_b,
+        )
+        return []
+
+    if norm_a in TICKER_COLLISIONS and not is_collision_pair_allowed(
+        norm_a,
+        snap_a.exchange,
+        base_a,
+        snap_b.exchange,
+        base_b,
+    ):
+        logger.info(
+            "ticker_collision_rejected",
+            symbol_a=snap_a.canonical_symbol,
+            exchange_a=snap_a.exchange,
+            symbol_b=snap_b.canonical_symbol,
+            exchange_b=snap_b.exchange,
+            normalized_base=norm_a,
         )
         return []
 

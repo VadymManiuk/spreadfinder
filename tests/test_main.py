@@ -158,6 +158,35 @@ def test_route_kind_classifies_spot_futures_separately():
     assert scanner._route_kind("binance", "gate") == "perp"
 
 
+def test_cex_match_lookup_keeps_collision_filtered_spot_routes_out():
+    scanner = _make_scanner(["gate", "okx"])
+    scanner._mapper.load_static("gate", {"AI_USDT": "AI-USDT-PERP"})
+    scanner._mapper.load_static("okx", {"AI-USDT-SWAP": "AI-USDT-PERP"})
+    scanner._mapper.load_static("gate_spot", {"AI_USDT": "AI-USDT-SPOT"})
+
+    matchable = scanner._mapper.get_matchable_pairs()
+    scanner._build_cex_match_lookup(matchable)
+
+    assert ("gate_spot", "AI-USDT-SPOT") not in scanner._match_lookup
+    assert ("okx", "AI-USDT-PERP") not in scanner._match_lookup
+
+
+def test_cex_match_lookup_keeps_allowlisted_spot_futures_routes():
+    scanner = _make_scanner(["gate"])
+    scanner._mapper.load_static("gate", {"AI_USDT": "AI-USDT-PERP"})
+    scanner._mapper.load_static("binance_spot", {"AIUSDT": "AI-USDT-SPOT"})
+
+    matchable = scanner._mapper.get_matchable_pairs()
+    scanner._build_cex_match_lookup(matchable)
+
+    assert scanner._match_lookup[("binance_spot", "AI-USDT-SPOT")] == [
+        ("gate", "AI-USDT-PERP")
+    ]
+    assert scanner._match_lookup[("gate", "AI-USDT-PERP")] == [
+        ("binance_spot", "AI-USDT-SPOT")
+    ]
+
+
 @pytest.mark.asyncio
 async def test_pump_alert_send_skips_when_dedicated_sender_missing():
     scanner = SpreadScanner(Settings(enabled_exchanges=["binance"]))

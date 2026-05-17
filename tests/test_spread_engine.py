@@ -138,6 +138,21 @@ class TestCalculateSpread:
         assert buy_spot[0].gross_spread == Decimal("0.0040")
         assert buy_spot[0].canonical_symbol == "AI-USDT-SPOT"
 
+    def test_unsafe_collision_pair_is_rejected(self):
+        """Same ticker is not enough when venues list different AI tokens."""
+        spot = make_snap(
+            exchange="gate_spot",
+            canonical_symbol="AI-USDT-SPOT",
+            ask="0.032160",
+        )
+        perp = make_snap(
+            exchange="okx",
+            canonical_symbol="AI-USDT-PERP",
+            bid="0.039300",
+        )
+
+        assert calculate_spread(spot, perp, now=NOW) == []
+
     def test_cross_quote_different_base_rejected(self):
         """Different base assets should still be rejected even with equivalent quotes."""
         snap_a = make_snap(canonical_symbol="APE-USDT-PERP")

@@ -18,16 +18,13 @@ import structlog
 import aiohttp
 
 from symbol_mapper.exchange_symbols import EXCHANGE_CONFIGS, ExchangeConfig
-from symbol_mapper.ticker_aliases import normalize_base, TICKER_COLLISIONS
+from symbol_mapper.ticker_aliases import (
+    TICKER_COLLISIONS,
+    is_collision_pair_allowed,
+    normalize_base,
+)
 
 logger = structlog.get_logger(__name__)
-
-# Collisions are normally excluded globally because the same ticker can refer
-# to different assets across venues. User-requested pairs below are allowed only
-# when the venue pair is known and the raw base matches exactly.
-_COLLISION_PAIR_ALLOWLIST: dict[str, set[frozenset[str]]] = {
-    "AI": {frozenset({"binance_spot", "gate"})},
-}
 
 # Per-exchange REST bootstrap timeout. Without this, a single slow/hung
 # endpoint blocks the entire startup. 15s is enough for any healthy exchange
@@ -367,12 +364,12 @@ class SymbolMapper:
                     quote_a = self.extract_quote(canon_a)
                     quote_b = self.extract_quote(canon_b)
 
-                    if norm_base in TICKER_COLLISIONS and not self._is_collision_pair_allowed(
+                    if norm_base in TICKER_COLLISIONS and not is_collision_pair_allowed(
                         norm_base,
                         ex_a,
-                        canon_a,
+                        self.extract_base(canon_a) or "",
                         ex_b,
-                        canon_b,
+                        self.extract_base(canon_b) or "",
                     ):
                         if norm_base not in skipped_collisions:
                             skipped_collisions.append(norm_base)
@@ -396,28 +393,3 @@ class SymbolMapper:
 
         logger.info("matchable_pairs_found", count=len(pairs))
         return pairs
-
-    @staticmethod
-    def _is_collision_pair_allowed(
-        normalized_base: str,
-        exchange_a: str,
-        canonical_a: str,
-        exchange_b: str,
-        canonical_b: str,
-    ) -> bool:
-        """
-        Return True for explicitly allowed collision pairs.
-
-        For collision tickers we require both venues to be allowlisted and the
-        raw base tickers to match exactly. This avoids aliasing two unrelated
-        assets through a broad ticker name.
-        """
-        allowed_pairs = _COLLISION_PAIR_ALLOWLIST.get(normalized_base)
-        if not allowed_pairs:
-            return False
-        if frozenset({exchange_a, exchange_b}) not in allowed_pairs:
-            return False
-
-        base_a = SymbolMapper.extract_base(canonical_a)
-        base_b = SymbolMapper.extract_base(canonical_b)
-        return base_a == base_b == normalized_base

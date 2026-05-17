@@ -155,6 +155,13 @@ TICKER_COLLISIONS: dict[str, str] = {
     "LEVER": "LeverFi — may differ across exchanges",
 }
 
+# Collision tickers are normally excluded globally because the same ticker can
+# refer to different assets across venues. Explicit allowlist entries below are
+# only for venue pairs that have been manually verified as the same asset.
+_COLLISION_PAIR_ALLOWLIST: dict[str, set[frozenset[str]]] = {
+    "AI": {frozenset({"binance_spot", "gate"})},
+}
+
 # Build reverse lookup: canonical → set of all aliases
 _CANONICAL_TO_ALIASES: dict[str, set[str]] = {}
 for _alias, _canonical in TICKER_ALIASES.items():
@@ -221,3 +228,24 @@ def are_same_asset(base_a: str, base_b: str) -> bool:
       are_same_asset("BTC", "ETH") → False
     """
     return normalize_base(base_a) == normalize_base(base_b)
+
+
+def is_collision_pair_allowed(
+    normalized_base: str,
+    exchange_a: str,
+    base_a: str,
+    exchange_b: str,
+    base_b: str,
+) -> bool:
+    """
+    Return True only for manually verified same-asset collision pairs.
+
+    Raw base tickers must match the normalized ticker exactly so broad aliases
+    cannot turn two unrelated collision tickers into a tradable pair.
+    """
+    allowed_pairs = _COLLISION_PAIR_ALLOWLIST.get(normalized_base)
+    if not allowed_pairs:
+        return False
+    if frozenset({exchange_a, exchange_b}) not in allowed_pairs:
+        return False
+    return base_a == base_b == normalized_base
