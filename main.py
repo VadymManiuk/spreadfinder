@@ -396,6 +396,20 @@ class SpreadScanner:
             # so we use a cross-quote aware calculation
             opportunities = calculate_spread(snapshot, other_snap)
             self._diag["spreads_calculated"] += len(opportunities)
+            active_routes = {
+                (opp.canonical_symbol, opp.buy_exchange, opp.sell_exchange)
+                for opp in opportunities
+            }
+            for canonical, buy_exchange, sell_exchange in (
+                (snapshot.canonical_symbol, snapshot.exchange, other_snap.exchange),
+                (other_snap.canonical_symbol, other_snap.exchange, snapshot.exchange),
+            ):
+                if (canonical, buy_exchange, sell_exchange) not in active_routes:
+                    self._filter_chain.remove_persistence_for(
+                        canonical,
+                        buy_exchange,
+                        sell_exchange,
+                    )
 
             for opp in opportunities:
                 route_kind = self._route_kind(opp.buy_exchange, opp.sell_exchange)
@@ -414,6 +428,7 @@ class SpreadScanner:
                 net_pct = float(opp.net_spread_bps) / 100.0
                 if net_pct < 1.0:
                     self._diag["spreads_rejected_hard"] += 1
+                    self._filter_chain.remove_persistence(opp)
                     continue
 
                 passed, results = self._filter_chain.evaluate(opp)

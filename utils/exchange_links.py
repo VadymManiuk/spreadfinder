@@ -12,6 +12,8 @@ Assumptions:
 
 from typing import Callable
 
+from utils.venues import exchange_family
+
 # One template (or builder function) per supported exchange.
 # Keys match the `exchange` field on MarketSnapshot / SpreadOpportunity.
 #
@@ -38,6 +40,10 @@ _BUILDERS: dict[str, Callable[[str], str]] = {
     "hyperliquid": lambda b: f"https://app.hyperliquid.xyz/trade/{b}",
     "aster":       lambda b: f"https://www.asterdex.com/en/futures/v1/{b}USDT",
     "lighter":     lambda b: f"https://app.lighter.xyz/trade/{b}",
+    # On-chain DEX sources. These feeds do not currently carry token contract
+    # addresses, so the URL opens the swap/search surface instead of a pair page.
+    "binance_alpha": lambda b: "https://www.binance.com/en/alpha",
+    "okx_dex":       lambda b: "https://www.okx.com/web3/dex-swap",
 }
 
 
@@ -50,7 +56,7 @@ def futures_url(exchange: str, base: str) -> str | None:
     """
     if not exchange or not base:
         return None
-    builder = _BUILDERS.get(exchange.lower())
+    builder = _BUILDERS.get(exchange_family(exchange.lower()))
     if builder is None:
         return None
     return builder(base.upper())

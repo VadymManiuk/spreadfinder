@@ -67,7 +67,7 @@ class FilterChain:
         max_data_age_ms: int = 2000,
         min_confidence: Decimal = Decimal("0.3"),
         cooldown_seconds: int = 300,
-        persistence_ms: int = 1000,
+        persistence_ms: int = 20000,
     ):
         self.min_gross_spread_bps = min_gross_spread_bps
         self.max_gross_spread_bps = max_gross_spread_bps
@@ -127,6 +127,8 @@ class FilterChain:
             result = check()
             results.append(result)
             if not result:
+                if result.filter_name not in {"cooldown", "persistence"}:
+                    self._persistence.remove(opp)
                 logger.debug(
                     "filter_rejected",
                     symbol=opp.canonical_symbol,
@@ -144,6 +146,15 @@ class FilterChain:
     def remove_persistence(self, opp: SpreadOpportunity) -> None:
         """Remove persistence tracking for a spread that disappeared."""
         self._persistence.remove(opp)
+
+    def remove_persistence_for(
+        self,
+        canonical_symbol: str,
+        buy_exchange: str,
+        sell_exchange: str,
+    ) -> None:
+        """Remove persistence tracking by route identity when no opportunity exists."""
+        self._persistence.remove_key(canonical_symbol, buy_exchange, sell_exchange)
 
     def clear_state(self) -> None:
         """Clear all stateful filter data (cooldowns, persistence)."""

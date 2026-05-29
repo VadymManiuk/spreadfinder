@@ -280,6 +280,16 @@ class PersistenceFilter:
         key = self._make_key(opp)
         self._first_seen.pop(key, None)
 
+    def remove_key(
+        self,
+        canonical_symbol: str,
+        buy_exchange: str,
+        sell_exchange: str,
+    ) -> None:
+        """Remove tracking for a route when the calculator no longer emits it."""
+        key = f"{canonical_symbol}:{buy_exchange}:{sell_exchange}"
+        self._first_seen.pop(key, None)
+
     def clear(self) -> None:
         """Clear all persistence state."""
         self._first_seen.clear()

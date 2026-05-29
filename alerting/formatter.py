@@ -16,7 +16,12 @@ from decimal import Decimal
 from models.snapshot import MarketSnapshot, SpreadOpportunity
 from pump_detector.models import PumpAlert
 from utils.exchange_links import futures_url, supported_exchanges
-from utils.venues import display_exchange, is_dex_exchange, is_spot_exchange
+from utils.venues import (
+    display_exchange,
+    exchange_family,
+    is_dex_exchange,
+    is_spot_exchange,
+)
 
 # Characters that must be escaped in MarkdownV2
 # https://core.telegram.org/bots/api#markdownv2-style
@@ -99,6 +104,30 @@ def _fmt_funding(rate: Decimal | None) -> str:
 
 # Backward-compatible helper names kept for legacy tests/imports.
 _fmt_volume = _fmt_vol
+
+_FUTURES_LINK_ORDER = [
+    "binance",
+    "bybit",
+    "gate",
+    "okx",
+    "bitget",
+    "mexc",
+    "hyperliquid",
+    "aster",
+    "lighter",
+]
+_SPOT_LINK_ORDER = [
+    "binance_spot",
+    "bybit_spot",
+    "gate_spot",
+    "okx_spot",
+    "bitget_spot",
+    "mexc_spot",
+]
+_DEX_LINK_ORDER = [
+    "binance_alpha",
+    "okx_dex",
+]
 
 
 def _dw_symbols(deposit_status: dict | None, exchange: str, base: str) -> str:
@@ -268,8 +297,8 @@ def format_grouped_alert(
 
     # ── HEADER ──────────────────────────────────────────────────────────
     lines = [
-        f"🔔 *{_e(base)}  {_e(f'{best_net_pct:.2f}%')}  "
-        f"{_e(display_exchange(best.buy_exchange))} → {_e(display_exchange(best.sell_exchange))}*",
+        f"🔔 *{_e(base)}  {_e(f'{best_net_pct:.2f}%')}*  "
+        f"{_exchange_link(best.buy_exchange, base)} → {_exchange_link(best.sell_exchange, base)}",
     ]
 
     # ── FUNDING COUNTDOWN PER EXCHANGE ──────────────────────────────────
@@ -369,11 +398,9 @@ def format_grouped_alert(
         lines.append(f"```\n{table_str}\n```")
         lines.append("DW: " + " \\| ".join(dw_parts))
 
-        # Clickable futures links — one per exchange in the table.
-        # Order matches the table so users can scan top-to-bottom.
-        links_line = _build_links_line(base, [r["ex"] for r in exchange_rows])
-        if links_line:
-            lines.append(f"🔗 {links_line}")
+        # Clickable trading links grouped by venue type.
+        for links_line in _build_grouped_links_lines(base, [r["ex"] for r in exchange_rows]):
+            lines.append(links_line)
         lines.append("")
 
     # ── ROUTES LIST (only if >1 route) ──────────────────────────────────
@@ -396,8 +423,80 @@ def format_grouped_alert(
 
 
 # ---------------------------------------------------------------------------
-# Pump / dump alert format
+# Trading link helpers
 # ---------------------------------------------------------------------------
+
+def _safe_link_url(url: str) -> str:
+    """Escape Telegram MarkdownV2 URL delimiters."""
+    return url.replace("\\", "\\\\").replace(")", "\\)")
+
+
+def _exchange_link(exchange: str, base: str) -> str:
+    """Build one MarkdownV2 exchange link, falling back to plain text."""
+    label = _e(display_exchange(exchange))
+    url = futures_url(exchange, base)
+    if not url:
+        return label
+    return f"[{label}]({_safe_link_url(url)})"
+
+
+def _link_category(exchange: str) -> str:
+    """Classify a trading link as futures, spot, or DEX."""
+    if is_dex_exchange(exchange):
+        return "dex"
+    if is_spot_exchange(exchange):
+        return "spot"
+    return "futures"
+
+
+def _ordered_exchanges_for_links(priority: list[str] | None = None) -> list[str]:
+    """
+    Return exchanges in deterministic order, keeping alert-relevant venues first.
+
+    DEX exchanges may include a chain suffix in live data; duplicates are
+    suppressed by venue family so `okx_dex:8453` does not repeat as `okx_dex`.
+    """
+    priority = priority or []
+    canonical_order = _FUTURES_LINK_ORDER + _SPOT_LINK_ORDER + _DEX_LINK_ORDER
+    supported_order = [
+        ex for ex in canonical_order if ex in supported_exchanges()
+    ] + [
+        ex for ex in supported_exchanges() if ex not in canonical_order
+    ]
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    for ex in priority + supported_order:
+        key = exchange_family(ex.lower())
+        if key in seen:
+            continue
+        seen.add(key)
+        ordered.append(ex)
+
+    return ordered
+
+
+def _build_grouped_links_lines(base: str, priority: list[str] | None = None) -> list[str]:
+    """
+    Build MarkdownV2 trading links grouped as Futures / Spot / DEX.
+    """
+    grouped: dict[str, list[str]] = {"futures": [], "spot": [], "dex": []}
+    for ex in _ordered_exchanges_for_links(priority):
+        grouped[_link_category(ex)].append(_exchange_link(ex, base))
+
+    labels = [
+        ("futures", "🔗", "Futures"),
+        ("spot", "🏦", "Spot"),
+        ("dex", "🧬", "DEX"),
+    ]
+    lines: list[str] = []
+    for key, icon, label in labels:
+        parts = grouped[key]
+        if parts:
+            lines.append(f"{icon} *{label}:* " + " \\| ".join(parts))
+    return lines
+
 
 def _build_links_line(base: str, priority: list[str] | None = None) -> str | None:
     """
@@ -412,36 +511,13 @@ def _build_links_line(base: str, priority: list[str] | None = None) -> str | Non
 
     Returns None only if no link could be built at all (should never happen).
     """
-    priority = priority or []
-
-    ordered: list[str] = []
-    seen: set[str] = set()
-
-    # 1. Exchanges explicitly in priority order
-    for ex in priority:
-        key = ex.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        ordered.append(key)
-
-    # 2. Every remaining supported exchange, alphabetically
-    for ex in supported_exchanges():
-        if ex in seen:
-            continue
-        seen.add(ex)
-        ordered.append(ex)
-
     parts: list[str] = []
     has_link = False
-    for ex in ordered:
+    for ex in _ordered_exchanges_for_links(priority):
         url = futures_url(ex, base)
         name_escaped = _e(display_exchange(ex))
         if url:
-            # MarkdownV2 link: [text](url). The URL must also have its
-            # special chars escaped per Telegram docs (only `)` and `\`).
-            safe_url = url.replace("\\", "\\\\").replace(")", "\\)")
-            parts.append(f"[{name_escaped}]({safe_url})")
+            parts.append(f"[{name_escaped}]({_safe_link_url(url)})")
             has_link = True
         else:
             parts.append(name_escaped)
@@ -450,6 +526,10 @@ def _build_links_line(base: str, priority: list[str] | None = None) -> str | Non
         return None
     return " \\| ".join(parts)
 
+
+# ---------------------------------------------------------------------------
+# Pump / dump alert format
+# ---------------------------------------------------------------------------
 
 def _fmt_mcap(mcap: float | None) -> str:
     """Format a market cap value as $X.XM/$X.XB or '?'."""
@@ -481,8 +561,8 @@ def format_pump_alert(alert: PumpAlert) -> str:
 
     Layout:
       🚀 PUMP  ARIA  +12.34%  in 1h
-      💰 MCap: $45M  |  Vol24h: $2.3M
       📈 0.0500 → 0.0561  (trigger: bitget)
+      💰 MCap: $45M  |  Vol24h: $2.3M
 
       ```
       Ex        Price     Vol
@@ -510,8 +590,8 @@ def format_pump_alert(alert: PumpAlert) -> str:
 
     lines = [
         f"{arrow_emoji} *{label}  {base}  {change_str}  in {window_str}*",
-        f"💰 MCap: {mcap_str}  \\|  Vol24h: {vol_str}",
         f"📈 `{start_str}` → `{current_str}`  \\(trigger: {trigger_ex}\\)",
+        f"💰 MCap: {mcap_str}  \\|  Vol24h: {vol_str}",
         "",
     ]
 

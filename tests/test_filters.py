@@ -12,6 +12,7 @@ from unittest.mock import patch
 
 import pytest
 
+from config.settings import FilterSettings
 from models.snapshot import SpreadOpportunity
 from filters.opportunity_filters import (
     check_min_gross_spread,
@@ -253,12 +254,27 @@ class TestPersistenceFilter:
         result = pf.check(opp)
         assert not result  # reset
 
+    def test_remove_key_resets_route_without_opportunity_object(self):
+        pf = PersistenceFilter(persistence_ms=100)
+        opp = make_opp()
+        pf.check(opp)
+
+        pf.remove_key("APE-USDT-PERP", "binance", "gate")
+
+        result = pf.check(opp)
+        assert not result
+        assert "first seen" in result.reason
+
 
 # ---------------------------------------------------------------------------
 # Filter chain
 # ---------------------------------------------------------------------------
 
 class TestFilterChain:
+
+    def test_default_persistence_is_twenty_seconds(self):
+        assert FilterSettings.model_fields["persistence_ms"].default == 20000
+        assert FilterChain()._persistence.persistence_ms == 20000
 
     def test_all_pass(self):
         chain = FilterChain(
@@ -386,6 +402,33 @@ class TestFilterChain:
         chain.clear_state()
         passed, _ = chain.evaluate(opp)
         assert passed
+
+    def test_quality_failure_resets_persistence_timer(self):
+        chain = FilterChain(
+            min_gross_spread_bps=Decimal("1"),
+            min_net_spread_bps=Decimal("5"),
+            min_bid_size=Decimal("1"),
+            min_ask_size=Decimal("1"),
+            max_data_age_ms=5000,
+            min_confidence=Decimal("0.0"),
+            cooldown_seconds=0,
+            persistence_ms=1000,
+        )
+        opp = make_opp(net_spread_bps=Decimal("50"))
+        chain.evaluate(opp)
+        key = chain._persistence._make_key(opp)
+        chain._persistence._first_seen[key] = time.monotonic() * 1000 - 2000
+
+        failed_opp = make_opp(net_spread_bps=Decimal("1"))
+        failed, failed_results = chain.evaluate(failed_opp)
+        assert not failed
+        assert failed_results[-1].filter_name == "min_net_spread"
+        assert key not in chain._persistence._first_seen
+
+        passed, results = chain.evaluate(opp)
+        assert not passed
+        assert results[-1].filter_name == "persistence"
+        assert "first seen" in results[-1].reason
 
     def test_dex_route_uses_stricter_net_spread_threshold(self):
         chain = FilterChain(

@@ -14,10 +14,12 @@ from alerting.formatter import (
     escape_md2,
     format_alert,
     format_grouped_alert,
+    format_pump_alert,
     _fmt_volume,
     _fmt_funding,
 )
 from models.snapshot import MarketSnapshot, SpreadOpportunity
+from pump_detector.models import PumpAlert
 
 
 NOW = datetime(2026, 1, 1, 12, 30, 45, tzinfo=timezone.utc)
@@ -240,3 +242,81 @@ class TestGroupedSpotAlert:
         assert "Binance Spot" in unescaped
         assert "spot" in unescaped
         assert "Binance Spot:" not in unescaped
+
+    def test_grouped_alert_links_are_categorized_and_header_is_clickable(self):
+        opp = make_opp(
+            canonical_symbol="AI-USDT-SPOT",
+            buy_exchange="binance_spot",
+            sell_exchange="gate",
+            buy_ask=Decimal("0.1200"),
+            sell_bid=Decimal("0.1240"),
+            net_spread_bps=Decimal("250"),
+        )
+        all_snapshots = {
+            "binance_spot": MarketSnapshot(
+                canonical_symbol="AI-USDT-SPOT",
+                exchange="binance_spot",
+                bid=Decimal("0.1199"),
+                ask=Decimal("0.1200"),
+                bid_size=Decimal("1000"),
+                ask_size=Decimal("1000"),
+                local_ts=NOW,
+            ),
+            "gate": MarketSnapshot(
+                canonical_symbol="AI-USDT-PERP",
+                exchange="gate",
+                bid=Decimal("0.1240"),
+                ask=Decimal("0.1242"),
+                bid_size=Decimal("1000"),
+                ask_size=Decimal("1000"),
+                funding_rate=Decimal("0.0001"),
+                local_ts=NOW,
+            ),
+            "binance_alpha:56": MarketSnapshot(
+                canonical_symbol="AI-USDT-SPOT",
+                exchange="binance_alpha:56",
+                bid=Decimal("0.1190"),
+                ask=Decimal("0.1195"),
+                bid_size=Decimal("1000"),
+                ask_size=Decimal("1000"),
+                local_ts=NOW,
+            ),
+        }
+
+        msg = format_grouped_alert([opp], all_snapshots=all_snapshots)
+
+        assert "[Binance Spot]" in msg.splitlines()[0]
+        assert "[Gate]" in msg.splitlines()[0]
+        assert "🔗 *Futures:*" in msg
+        assert "🏦 *Spot:*" in msg
+        assert "🧬 *DEX:*" in msg
+        assert "[Binance Alpha \\(BSC\\)]" in msg
+
+
+class TestPumpAlert:
+
+    def test_price_change_line_precedes_market_context(self):
+        alert = PumpAlert(
+            base="ESPORTS",
+            direction="dump",
+            start_price=Decimal("0.046510"),
+            current_price=Decimal("0.041350"),
+            change_pct=Decimal("-11.09"),
+            window_seconds=59 * 60,
+            start_ts=NOW,
+            current_ts=NOW,
+            max_volume_24h=Decimal("69200000"),
+            market_cap=None,
+            triggered_on="gate",
+            timestamp=NOW,
+        )
+
+        lines = format_pump_alert(alert).splitlines()
+
+        price_line_index = next(
+            i for i, line in enumerate(lines) if line.startswith("📈")
+        )
+        market_line_index = next(
+            i for i, line in enumerate(lines) if line.startswith("💰")
+        )
+        assert price_line_index < market_line_index

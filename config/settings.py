@@ -67,7 +67,7 @@ class FilterSettings(BaseSettings):
 
     # Alert spam prevention
     cooldown_seconds: int = 1800
-    persistence_ms: int = 1000
+    persistence_ms: int = 20000
 
     # Confidence threshold
     min_confidence: Decimal = Decimal("0.3")

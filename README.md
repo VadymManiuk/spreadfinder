@@ -111,7 +111,7 @@ All settings are in `.env`. See `.env.example` for the full list with defaults.
 | `MAX_GROSS_SPREAD_BPS` | 500.0 | Maximum gross spread allowed before treating it as bad/stale data |
 | `MIN_NET_SPREAD_BPS` | 5.0 | Minimum net spread after costs |
 | `COOLDOWN_SECONDS` | 300 | Alert cooldown per symbol+direction |
-| `PERSISTENCE_MS` | 1000 | Spread must persist this long before alert |
+| `PERSISTENCE_MS` | 20000 | Spread must persist this long before alert |
 | `MAX_DATA_AGE_MS` | 2000 | Maximum acceptable data staleness |
 | `MIN_CONFIDENCE` | 0.3 | Minimum confidence score (0.0–1.0) |
 
