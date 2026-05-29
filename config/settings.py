@@ -277,3 +277,5 @@ class Settings(BaseSettings):
     # Market cap filter — targets small-cap tokens
     max_market_cap: int = 200_000_000  # $200M — above this, skip token
     mcap_refresh_interval: int = 1800  # 30 minutes
+    coinmarketcap_api_key: str = ""    # optional, used for on-demand mcap lookup
+    coingecko_api_key: str = ""        # optional CoinGecko demo/pro key

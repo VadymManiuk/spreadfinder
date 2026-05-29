@@ -94,7 +94,7 @@ from filters.filter_chain import FilterChain
 from filters.market_cap_filter import MarketCapFilter
 from alerting.telegram import TelegramSender
 from models.snapshot import MarketSnapshot
-from pump_detector import PriceHistory, PumpDetector
+from pump_detector import PriceHistory, PumpAlert, PumpDetector
 from utils.venues import is_dex_exchange, is_spot_exchange
 
 logger = structlog.get_logger(__name__)
@@ -216,6 +216,8 @@ class SpreadScanner:
             max_mcap=settings.pump.max_market_cap,
             min_mcap=settings.pump.min_market_cap,
             refresh_interval=settings.mcap_refresh_interval,
+            coinmarketcap_api_key=settings.coinmarketcap_api_key,
+            coingecko_api_key=settings.coingecko_api_key,
         )
         self._price_history = PriceHistory(
             retention_minutes=settings.pump.history_retention_minutes,
@@ -557,6 +559,10 @@ class SpreadScanner:
                     continue
                 alerts = self._pump_detector.scan()
                 for alert in alerts:
+                    enriched_alert = await self._enrich_pump_alert_market_cap(alert)
+                    if enriched_alert is None:
+                        continue
+                    alert = enriched_alert
                     logger.info(
                         "pump_alert",
                         base=alert.base,
@@ -573,6 +579,43 @@ class SpreadScanner:
                 break
             except Exception:
                 logger.exception("pump_loop_error")
+
+    async def _enrich_pump_alert_market_cap(
+        self,
+        alert: PumpAlert,
+    ) -> PumpAlert | None:
+        """
+        Fill missing pump/dump market cap before sending an alert.
+
+        The detector is synchronous, so it can only use the periodic mcap cache.
+        Long-tail tokens are often absent from that cache; this async step does
+        a targeted lookup and reapplies the configured market-cap bounds.
+        """
+        if alert.market_cap is not None or self._mcap_filter is None:
+            return alert
+
+        market_cap = await self._mcap_filter.get_mcap_async(alert.base)
+        if market_cap is None:
+            return alert
+
+        if market_cap > self._pump_detector.max_market_cap:
+            logger.info(
+                "pump_alert_rejected_market_cap",
+                base=alert.base,
+                market_cap=market_cap,
+                max_market_cap=self._pump_detector.max_market_cap,
+            )
+            return None
+        if market_cap < self._pump_detector.min_market_cap:
+            logger.info(
+                "pump_alert_rejected_market_cap",
+                base=alert.base,
+                market_cap=market_cap,
+                min_market_cap=self._pump_detector.min_market_cap,
+            )
+            return None
+
+        return alert.model_copy(update={"market_cap": market_cap})
 
     async def _supervise_adapter(self, adapter) -> None:
         """

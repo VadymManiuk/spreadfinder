@@ -253,3 +253,55 @@ async def test_pump_alert_send_does_not_fallback_to_main_sender_on_secondary_fai
     assert sent is False
     assert scanner._pump_telegram.calls == 1
     assert scanner._telegram.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_pump_alert_enrichment_fills_missing_market_cap():
+    scanner = SpreadScanner(Settings(enabled_exchanges=["binance"]))
+
+    class StubMarketCapFilter:
+        async def get_mcap_async(self, base: str) -> float | None:
+            assert base == "ESPORTS"
+            return 45_000_000
+
+    scanner._mcap_filter = StubMarketCapFilter()
+    alert = PumpAlert(
+        base="ESPORTS",
+        direction="dump",
+        start_price=Decimal("0.046510"),
+        current_price=Decimal("0.041350"),
+        change_pct=Decimal("-11.09"),
+        window_seconds=59 * 60,
+        start_ts=datetime.now(timezone.utc),
+        current_ts=datetime.now(timezone.utc),
+        triggered_on="gate",
+    )
+
+    enriched = await scanner._enrich_pump_alert_market_cap(alert)
+
+    assert enriched is not None
+    assert enriched.market_cap == 45_000_000
+
+
+@pytest.mark.asyncio
+async def test_pump_alert_enrichment_rejects_newly_known_large_cap():
+    scanner = SpreadScanner(Settings(enabled_exchanges=["binance"]))
+
+    class StubMarketCapFilter:
+        async def get_mcap_async(self, base: str) -> float | None:
+            return 1_500_000_000
+
+    scanner._mcap_filter = StubMarketCapFilter()
+    alert = PumpAlert(
+        base="BTC",
+        direction="pump",
+        start_price=Decimal("100000"),
+        current_price=Decimal("110000"),
+        change_pct=Decimal("10"),
+        window_seconds=60,
+        start_ts=datetime.now(timezone.utc),
+        current_ts=datetime.now(timezone.utc),
+        triggered_on="gate",
+    )
+
+    assert await scanner._enrich_pump_alert_market_cap(alert) is None

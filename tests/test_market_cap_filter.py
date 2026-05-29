@@ -12,6 +12,35 @@ import pytest
 from filters.market_cap_filter import MarketCapFilter, HARD_EXCLUDE_MCAP
 
 
+class FakeResponse:
+    def __init__(self, payload, status: int = 200):
+        self.payload = payload
+        self.status = status
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+    def raise_for_status(self):
+        if self.status >= 400:
+            raise AssertionError(f"unexpected status {self.status}")
+
+    async def json(self):
+        return self.payload
+
+
+class FakeSession:
+    def __init__(self, responses: list[FakeResponse]):
+        self.responses = responses
+        self.calls = []
+
+    def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.responses.pop(0)
+
+
 class TestIsAllowed:
 
     def setup_method(self):
@@ -110,3 +139,45 @@ class TestGetMcap:
     def test_returns_none_for_unknown(self):
         f = MarketCapFilter()
         assert f.get_mcap("UNKNOWN") is None
+
+
+class TestOnDemandLookup:
+
+    @pytest.mark.asyncio
+    async def test_uses_coinmarketcap_when_key_is_configured(self):
+        session = FakeSession([
+            FakeResponse({
+                "data": {
+                    "ESPORTS": [
+                        {"quote": {"USD": {"market_cap": 12_345_678}}},
+                    ],
+                },
+            }),
+        ])
+        f = MarketCapFilter(coinmarketcap_api_key="cmc-key")
+        f._session = session
+
+        assert await f.get_mcap_async("ESPORTS") == 12_345_678
+        assert f.get_mcap("ESPORTS") == 12_345_678
+        assert "coinmarketcap" in session.calls[0][0]
+
+    @pytest.mark.asyncio
+    async def test_falls_back_to_coingecko_search_for_long_tail_symbol(self):
+        session = FakeSession([
+            FakeResponse({
+                "coins": [
+                    {"id": "esports-token", "symbol": "esports", "market_cap_rank": 1800},
+                    {"id": "not-esports", "symbol": "nope", "market_cap_rank": 10},
+                ],
+            }),
+            FakeResponse([
+                {"id": "esports-token", "symbol": "esports", "market_cap": 9_876_543},
+            ]),
+        ])
+        f = MarketCapFilter()
+        f._session = session
+
+        assert await f.get_mcap_async("esports") == 9_876_543
+        assert f.get_mcap("ESPORTS") == 9_876_543
+        assert session.calls[0][1]["params"]["query"] == "ESPORTS"
+        assert session.calls[1][1]["params"]["ids"] == "esports-token"
