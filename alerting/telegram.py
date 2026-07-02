@@ -451,6 +451,16 @@ class TelegramSender:
             if self.passes_filter(o) and self.passes_ticker_exclusion(o)
         ]
         if not passing:
+            best_net_pct = max((float(o.net_spread_bps) / 100.0 for o in opps), default=0.0)
+            bases = sorted({self._base_from_symbol(o.canonical_symbol) for o in opps})
+            logger.info(
+                "grouped_alert_filtered_out",
+                route_count=len(opps),
+                bases=bases,
+                best_net_pct=round(best_net_pct, 2),
+                min_spread_pct=self.get_min_spread_pct(),
+                excluded_tickers=self.get_excluded_tickers(),
+            )
             return False
 
         # Sort by net spread descending (best first)
