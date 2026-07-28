@@ -12,7 +12,6 @@ Assumptions:
 """
 
 import asyncio
-import os
 from dataclasses import dataclass
 
 import aiohttp
@@ -70,17 +69,18 @@ class DepositChecker:
     with public APIs. Provides O(1) lookup by (exchange, base_token).
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        okx_api_key: str = "",
+        okx_api_secret: str = "",
+        okx_passphrase: str = "",
+    ) -> None:
         # (exchange, BASE) -> CoinStatus
         self._status: dict[tuple[str, str], CoinStatus] = {}
         self._task: asyncio.Task | None = None
-
-        # Load .env so os.getenv picks up OKX credentials
-        try:
-            from dotenv import load_dotenv
-            load_dotenv()
-        except ImportError:
-            pass
+        self._okx_api_key = okx_api_key
+        self._okx_api_secret = okx_api_secret
+        self._okx_passphrase = okx_passphrase
 
     async def start(self) -> None:
         """Fetch initial data and start periodic refresh."""
@@ -270,19 +270,22 @@ class DepositChecker:
         Returns deposit/withdraw status per currency per chain.
         A coin is available if ANY chain supports the operation.
         """
-        api_key = os.getenv("OKX_API_KEY", "")
-        api_secret = os.getenv("OKX_API_SECRET", "")
-        passphrase = os.getenv("OKX_PASSPHRASE", "")
-
-        if not api_key or not api_secret or not passphrase:
-            logger.debug("okx_deposit_skipped", reason="no API credentials")
+        if (
+            not self._okx_api_key
+            or not self._okx_api_secret
+            or not self._okx_passphrase
+        ):
+            logger.debug(
+                "okx_deposit_skipped",
+                reason="no OKX Exchange API credentials",
+            )
             return
 
         path = "/api/v5/asset/currencies"
         headers = okx_headers(
-            api_key=api_key,
-            api_secret=api_secret,
-            passphrase=passphrase,
+            api_key=self._okx_api_key,
+            api_secret=self._okx_api_secret,
+            passphrase=self._okx_passphrase,
             method="GET",
             request_path=path,
         )

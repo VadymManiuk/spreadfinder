@@ -2,6 +2,7 @@ from config.settings import (
     AdapterSettings,
     ExchangeFees,
     FilterSettings,
+    OkxExchangeAuthSettings,
     PumpTelegramSettings,
     Settings,
     TelegramSettings,
@@ -13,5 +14,6 @@ __all__ = [
     "PumpTelegramSettings",
     "FilterSettings",
     "ExchangeFees",
+    "OkxExchangeAuthSettings",
     "AdapterSettings",
 ]

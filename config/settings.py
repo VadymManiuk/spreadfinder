@@ -233,9 +233,7 @@ class SpotSettings(BaseSettings):
 
 class OkxAuthSettings(BaseSettings):
     """
-    Shared OKX API credentials.
-
-    Used for both wallet/asset endpoints and authenticated DEX Market API calls.
+    OKX Web3 Developer Portal credentials for DEX Market API calls.
     """
 
     model_config = SettingsConfigDict(env_prefix="OKX_", **_ENV_FILE_CONFIG)
@@ -244,6 +242,19 @@ class OkxAuthSettings(BaseSettings):
     api_secret: str = ""
     passphrase: str = ""
     project_id: str = ""
+
+
+class OkxExchangeAuthSettings(BaseSettings):
+    """Optional read-only OKX Exchange credentials for asset availability."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="OKX_EXCHANGE_",
+        **_ENV_FILE_CONFIG,
+    )
+
+    api_key: str = ""
+    api_secret: str = ""
+    passphrase: str = ""
 
 
 class Settings(BaseSettings):
@@ -268,6 +279,9 @@ class Settings(BaseSettings):
     dex: DexSettings = Field(default_factory=DexSettings)
     spot: SpotSettings = Field(default_factory=SpotSettings)
     okx_auth: OkxAuthSettings = Field(default_factory=OkxAuthSettings)
+    okx_exchange_auth: OkxExchangeAuthSettings = Field(
+        default_factory=OkxExchangeAuthSettings
+    )
 
     # Logging
     log_level: str = "INFO"

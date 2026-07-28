@@ -166,7 +166,12 @@ class SpreadScanner:
         self._flush_tasks: dict[tuple[str, str], asyncio.Task] = {}
 
         # Deposit/withdrawal checker for alert enrichment
-        self._deposit_checker = DepositChecker()
+        exchange_auth = settings.okx_exchange_auth
+        self._deposit_checker = DepositChecker(
+            okx_api_key=exchange_auth.api_key,
+            okx_api_secret=exchange_auth.api_secret,
+            okx_passphrase=exchange_auth.passphrase,
+        )
 
         # Components
         mapper_exchanges = list(settings.enabled_exchanges)
