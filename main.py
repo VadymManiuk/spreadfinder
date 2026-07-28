@@ -221,6 +221,9 @@ class SpreadScanner:
         )
         self._price_history = PriceHistory(
             retention_minutes=settings.pump.history_retention_minutes,
+            sample_interval_seconds=settings.pump.history_sample_interval_seconds,
+            max_samples_per_series=settings.pump.history_max_samples_per_series,
+            window_buffer_minutes=settings.pump.history_window_buffer_minutes,
         )
         self._pump_detector = PumpDetector(
             history=self._price_history,
@@ -319,10 +322,16 @@ class SpreadScanner:
         """Toggle pump alerts at runtime (called from /pumpon, /pumpoff)."""
         was = self._pump_enabled
         self._pump_enabled = enabled
+        if not enabled:
+            self._price_history.clear()
         if enabled and not was and self._running:
             if self._pump_task is None or self._pump_task.done():
                 self._pump_task = asyncio.create_task(self._pump_check_loop())
-        logger.info("pump_toggled", enabled=enabled)
+        logger.info(
+            "pump_toggled",
+            enabled=enabled,
+            history_cleared=not enabled,
+        )
 
     def _extract_base(self, canonical: str) -> str:
         """Extract base token from canonical symbol. 'POLYX-USDT-PERP' → 'POLYX'."""
@@ -367,10 +376,11 @@ class SpreadScanner:
         self._snapshots[key] = snapshot
         self._diag["snapshots_total"] += 1
 
-        # Record into pump-detector price history
-        base_for_history = self._extract_base(snapshot.canonical_symbol)
-        if base_for_history:
-            self._price_history.record(base_for_history, snapshot)
+        # Pump history is independent from the live spread state above.
+        if self._pump_enabled:
+            base_for_history = self._extract_base(snapshot.canonical_symbol)
+            if base_for_history:
+                self._price_history.record(base_for_history, snapshot)
 
         # Throttle: skip spread calculation if we just did it for this key
         now = _time.monotonic()

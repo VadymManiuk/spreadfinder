@@ -44,6 +44,7 @@ class PumpDetector:
         self.history = history
         self.min_change_pct = Decimal(min_change_pct)
         self.window_seconds = window_minutes * 60
+        self.history.configure_window(window_minutes)
         self.min_volume_24h = Decimal(min_volume_24h)
         self.cooldown_seconds = cooldown_seconds
         self.mcap_filter = mcap_filter
@@ -66,6 +67,7 @@ class PumpDetector:
             self.min_change_pct = Decimal(min_change_pct)
         if window_minutes is not None:
             self.window_seconds = window_minutes * 60
+            self.history.configure_window(window_minutes)
         if min_volume_24h is not None:
             self.min_volume_24h = Decimal(min_volume_24h)
 
@@ -75,6 +77,7 @@ class PumpDetector:
     def scan(self, now: datetime | None = None) -> list[PumpAlert]:
         """Scan all known tokens; return alerts that pass filters & cooldown."""
         ref = now or datetime.now(timezone.utc)
+        self.history.prune(ref)
         alerts: list[PumpAlert] = []
 
         for base in self.history.known_bases():

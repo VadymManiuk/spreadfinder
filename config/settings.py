@@ -36,7 +36,7 @@ class PumpTelegramSettings(BaseSettings):
     """
     Dedicated Telegram destination for pump/dump alerts.
 
-    If `chat_id` is left empty, the scanner falls back to `TELEGRAM_CHAT_ID`.
+    Both token and chat ID are required; pump alerts never fall back to main.
     """
 
     model_config = SettingsConfigDict(env_prefix="PUMP_TELEGRAM_", **_ENV_FILE_CONFIG)
@@ -148,8 +148,11 @@ class PumpSettings(BaseSettings):
     # Spam prevention
     cooldown_seconds: int = 1800                      # 30 min between alerts per token+direction
 
-    # History retention — keep at least window + buffer
-    history_retention_minutes: int = 180
+    # Bounded history. Cadence scales up automatically for long pump windows.
+    history_retention_minutes: int = Field(default=90, gt=0)
+    history_sample_interval_seconds: int = Field(default=10, gt=0)
+    history_max_samples_per_series: int = Field(default=600, ge=2)
+    history_window_buffer_minutes: int = Field(default=30, ge=0)
 
 
 class AdapterSettings(BaseSettings):

@@ -7,8 +7,14 @@ from decimal import Decimal
 
 import pytest
 
-from config.settings import PumpTelegramSettings, Settings, TelegramSettings
+from config.settings import (
+    PumpSettings,
+    PumpTelegramSettings,
+    Settings,
+    TelegramSettings,
+)
 from main import SpreadScanner
+from models.snapshot import MarketSnapshot
 from pump_detector.models import PumpAlert
 
 
@@ -185,6 +191,61 @@ def test_cex_match_lookup_keeps_allowlisted_spot_futures_routes():
     assert scanner._match_lookup[("gate", "AI-USDT-PERP")] == [
         ("binance_spot", "AI-USDT-SPOT")
     ]
+
+
+@pytest.mark.asyncio
+async def test_disabled_pump_detector_does_not_accumulate_history():
+    scanner = SpreadScanner(
+        Settings(
+            enabled_exchanges=["binance"],
+            pump=PumpSettings(enabled=False),
+        )
+    )
+    now = datetime.now(timezone.utc)
+    snapshot = MarketSnapshot(
+        canonical_symbol="AVNT-USDT-PERP",
+        exchange="binance",
+        bid=Decimal("0.14"),
+        ask=Decimal("0.16"),
+        bid_size=Decimal("1000"),
+        ask_size=Decimal("1000"),
+        exchange_ts=now,
+        local_ts=now,
+        mark_price=Decimal("0.15"),
+        volume_24h=Decimal("1000000"),
+        is_stale=False,
+    )
+
+    await scanner._on_snapshot(snapshot)
+
+    assert scanner._snapshots[("binance", "AVNT-USDT-PERP")] is snapshot
+    assert scanner._price_history.stats().sample_count == 0
+
+
+def test_disabling_pump_detector_clears_existing_history():
+    scanner = _make_scanner(["binance"])
+    now = datetime.now(timezone.utc)
+    scanner._price_history.record(
+        "AVNT",
+        MarketSnapshot(
+            canonical_symbol="AVNT-USDT-PERP",
+            exchange="binance",
+            bid=Decimal("0.14"),
+            ask=Decimal("0.16"),
+            bid_size=Decimal("1000"),
+            ask_size=Decimal("1000"),
+            exchange_ts=now,
+            local_ts=now,
+            mark_price=Decimal("0.15"),
+            volume_24h=Decimal("1000000"),
+            is_stale=False,
+        ),
+    )
+
+    scanner._set_pump_enabled(False)
+
+    assert scanner._price_history.stats().sample_count == 0
+    assert scanner._price_history.stats().series_count == 0
 
 
 @pytest.mark.asyncio

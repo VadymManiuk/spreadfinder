@@ -125,14 +125,27 @@ PUMP_TELEGRAM_BOT_TOKEN=...
 PUMP_TELEGRAM_CHAT_ID=...
 ```
 
-If `PUMP_TELEGRAM_CHAT_ID` is left empty, the scanner falls back to
-`TELEGRAM_CHAT_ID`. The secondary bot is send-only: `/pump` controls and the
+Both dedicated bot values are required. Pump alerts never fall back to the
+spread bot. The secondary bot is send-only: `/pump` controls and the
 interactive panels stay on the main bot.
 
 Pump/dump detection uses futures reference prices (`mark_price`, fallback
 `index_price`) instead of raw order-book mid, and ignores DEX aggregator
 sources like Binance Alpha / OKX DEX as standalone triggers. This avoids false
 alerts from thin books or noisy spot aggregator quotes.
+
+Pump history stores at most one sample every 10 seconds and at most 600
+samples per token+exchange series. The cadence automatically becomes coarser
+for long windows such as 4 hours, keeping memory bounded. Live spread
+snapshots are still updated on every tick. Disabling pump alerts clears pump
+history immediately; after re-enabling, detection needs time to warm up.
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `PUMP_HISTORY_RETENTION_MINUTES` | `90` | Minimum retained history |
+| `PUMP_HISTORY_SAMPLE_INTERVAL_SECONDS` | `10` | Minimum sample cadence |
+| `PUMP_HISTORY_MAX_SAMPLES_PER_SERIES` | `600` | Hard cap per token+exchange |
+| `PUMP_HISTORY_WINDOW_BUFFER_MINUTES` | `30` | Extra retention beyond the active window |
 
 ### DEX Alert Settings
 

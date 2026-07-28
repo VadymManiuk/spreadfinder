@@ -83,6 +83,132 @@ def test_price_history_uses_mark_price_not_book_mid() -> None:
     assert current_price == Decimal("0.151")
 
 
+def test_price_history_throttles_samples_but_keeps_latest_snapshot() -> None:
+    history = PriceHistory(
+        retention_minutes=90,
+        sample_interval_seconds=10,
+        max_samples_per_series=600,
+    )
+    base = "AVNT"
+    start = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+    history.record(
+        base,
+        _snapshot(
+            exchange="aster",
+            bid="0.14",
+            ask="0.16",
+            mark="0.15",
+            ts=start,
+        ),
+    )
+    latest = _snapshot(
+        exchange="aster",
+        bid="0.15",
+        ask="0.17",
+        mark="0.16",
+        ts=start + timedelta(seconds=5),
+    )
+    history.record(base, latest)
+
+    stats = history.stats()
+    assert stats.sample_count == 1
+    assert stats.throttled_samples == 1
+    assert history.latest_snapshots_for_base(base)["aster"] is latest
+
+
+def test_price_history_enforces_hard_cap_per_series() -> None:
+    history = PriceHistory(
+        retention_minutes=90,
+        sample_interval_seconds=1,
+        max_samples_per_series=5,
+    )
+    start = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+    for offset in range(10):
+        history.record(
+            "AVNT",
+            _snapshot(
+                exchange="aster",
+                bid="0.14",
+                ask="0.16",
+                mark=str(Decimal("0.15") + Decimal(offset) / 1000),
+                ts=start + timedelta(seconds=offset),
+            ),
+        )
+
+    stats = history.stats()
+    assert stats.series_count == 1
+    assert stats.sample_count == 5
+    assert stats.max_samples_per_series == 5
+
+
+def test_price_history_trims_expired_samples() -> None:
+    history = PriceHistory(
+        retention_minutes=1,
+        sample_interval_seconds=1,
+        max_samples_per_series=100,
+        window_buffer_minutes=0,
+    )
+    start = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+    for offset in (0, 30, 61):
+        history.record(
+            "AVNT",
+            _snapshot(
+                exchange="aster",
+                bid="0.14",
+                ask="0.16",
+                mark="0.15",
+                ts=start + timedelta(seconds=offset),
+            ),
+        )
+
+    assert history.stats().sample_count == 2
+
+
+def test_price_history_prunes_inactive_series() -> None:
+    history = PriceHistory(
+        retention_minutes=1,
+        sample_interval_seconds=1,
+        max_samples_per_series=100,
+        window_buffer_minutes=0,
+    )
+    start = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+    history.record(
+        "AVNT",
+        _snapshot(
+            exchange="aster",
+            bid="0.14",
+            ask="0.16",
+            mark="0.15",
+            ts=start,
+        ),
+    )
+
+    history.prune(start + timedelta(seconds=61))
+
+    assert history.stats().series_count == 0
+    assert history.stats().sample_count == 0
+    assert history.known_bases() == []
+
+
+def test_price_history_adapts_cadence_for_four_hour_window() -> None:
+    history = PriceHistory(
+        retention_minutes=90,
+        sample_interval_seconds=10,
+        max_samples_per_series=600,
+        window_buffer_minutes=30,
+    )
+
+    history.configure_window(240)
+
+    stats = history.stats()
+    assert stats.retention_minutes == 270
+    assert stats.sample_interval_seconds == 28
+    assert stats.max_samples_per_series == 600
+
+
 def test_price_history_ignores_dex_aggregator_snapshots() -> None:
     history = PriceHistory(retention_minutes=180)
     base = "BOB"
@@ -198,3 +324,39 @@ def test_pump_detector_alert_table_uses_reference_prices() -> None:
     assert alert.current_price == Decimal("0.160")
     assert alert.exchange_prices["aster"] == Decimal("0.160")
     assert alert.exchange_prices["bybit"] == Decimal("0.160")
+
+
+def test_pump_detector_detects_sixty_minute_move_with_throttled_history() -> None:
+    history = PriceHistory(
+        retention_minutes=90,
+        sample_interval_seconds=10,
+        max_samples_per_series=600,
+    )
+    detector = PumpDetector(
+        history=history,
+        min_change_pct=Decimal("5"),
+        window_minutes=60,
+        min_volume_24h=Decimal("100000"),
+        cooldown_seconds=1800,
+    )
+    start = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+    for offset in range(0, 3601):
+        mark = Decimal("1.0") + Decimal(offset) / Decimal("36000")
+        history.record(
+            "AVNT",
+            _snapshot(
+                exchange="aster",
+                bid=str(mark - Decimal("0.001")),
+                ask=str(mark + Decimal("0.001")),
+                mark=str(mark),
+                ts=start + timedelta(seconds=offset),
+            ),
+        )
+
+    alerts = detector.scan(now=start + timedelta(minutes=60))
+
+    assert len(alerts) == 1
+    assert alerts[0].change_pct == Decimal("10.0")
+    assert history.stats().sample_count == 361
+    assert history.stats().throttled_samples == 3240

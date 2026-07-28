@@ -21,6 +21,7 @@ import structlog
 from models.snapshot import SpreadOpportunity
 from pump_detector.models import PumpAlert
 from alerting.formatter import format_alert, format_grouped_alert, format_pump_alert
+from utils.process_metrics import current_rss_bytes
 
 logger = structlog.get_logger(__name__)
 
@@ -615,6 +616,13 @@ class TelegramSender:
         dex_min_vol = float(getattr(chain, "dex_min_volume_24h", 0) or 0) if chain else 0.0
 
         matchable_count = sum(len(v) for v in scanner._match_lookup.values()) // 2
+        history_stats = scanner._price_history.stats()
+        rss_bytes = current_rss_bytes()
+        rss_text = (
+            f"{rss_bytes / (1024 ** 2):,.1f} MiB"
+            if rss_bytes is not None
+            else "unavailable"
+        )
 
         await self._send_plain(
             cid,
@@ -643,6 +651,13 @@ class TelegramSender:
             f"Sent:           {diag['pumps_sent']:,}\n"
             f"Last alert:     {last_pump_str}\n"
             f"Enabled:        {'yes' if scanner._pump_enabled else 'no'}\n"
+            f"History:        {history_stats.series_count:,} series / "
+            f"{history_stats.sample_count:,} samples\n"
+            f"Throttled:      {history_stats.throttled_samples:,}\n"
+            f"Cadence/cap:    {history_stats.sample_interval_seconds}s / "
+            f"{history_stats.max_samples_per_series} per series\n"
+            f"Retention:      {history_stats.retention_minutes} min\n"
+            f"Process RSS:    {rss_text}\n"
         )
 
     # ------------------------------------------------------------------
